@@ -1,4 +1,4 @@
-python-twitter
 Mastodon.py
 beautifulsoup4
-tweepy
+atproto
+python-dotenv

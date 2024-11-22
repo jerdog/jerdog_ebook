@@ -1,40 +1,57 @@
-import random
 import re
 import sys
-import twitter
-import tweepy
+import random
 from mastodon import Mastodon
+from atproto import Client
 import markov
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+import os
+import datetime
 
 try:
     # Python 3
     from html.entities import name2codepoint as n2c
     from urllib.request import urlopen
-except ImportError:
+except:
     # Python 2
     from htmlentitydefs import name2codepoint as n2c
     from urllib2 import urlopen
-    chr = unichr
+
+# Load environment variables from .env file
+load_dotenv()
+
 from local_settings import *
 
 
-def connect(type='twitter'):
-    if type == 'twitter':
-        if TWITTER_API_VERSION == 'v2':
-            return tweepy.Client(bearer_token=MY_BEARER_TOKEN,
-                                 consumer_key=MY_CONSUMER_KEY,
-                                 consumer_secret=MY_CONSUMER_SECRET,
-                                 access_token=MY_ACCESS_TOKEN_KEY,
-                                 access_token_secret=MY_ACCESS_TOKEN_SECRET)
-        else:
-            return twitter.Api(consumer_key=MY_CONSUMER_KEY,
-                           consumer_secret=MY_CONSUMER_SECRET,
-                           access_token_key=MY_ACCESS_TOKEN_KEY,
-                           access_token_secret=MY_ACCESS_TOKEN_SECRET,
-                           tweet_mode='extended')
-    elif type == 'mastodon':
-        return Mastodon(client_id=CLIENT_CRED_FILENAME, api_base_url=MASTODON_API_BASE_URL, access_token=USER_ACCESS_FILENAME)
+def connect(type='bluesky'):
+    if type == 'mastodon':
+        print(f"Mastodon Config:")
+        print(f"API Base URL: {MASTODON_API_BASE_URL}")
+        print(f"Client Key: {MASTODON_KEY}")
+        print(f"Client Secret: {MASTODON_SECRET}")
+        print(f"Access Token: {MASTODON_TOKEN}")
+        
+        if not MASTODON_API_BASE_URL:
+            raise ValueError("MASTODON_API_BASE_URL is not set in environment")
+            
+        return Mastodon(
+            client_id=MASTODON_KEY,
+            client_secret=MASTODON_SECRET,
+            access_token=MASTODON_TOKEN,
+            api_base_url=MASTODON_API_BASE_URL
+        )
+    elif type == 'bluesky':
+        print(f"Bluesky Config:")
+        print(f"UID: {BLUESKY_UID}")
+        print(f"Password: {'*' * len(BLUESKY_PWD) if BLUESKY_PWD else 'Not Set'}")
+        
+        if not BLUESKY_UID or not BLUESKY_PWD:
+            raise ValueError("BLUESKY_UID or BLUESKY_PWD not set in environment")
+            
+        client = Client()
+        client.login(BLUESKY_UID, BLUESKY_PWD)
+        return client
     return None
 
 
@@ -49,224 +66,301 @@ def entity(text):
             pass
     else:
         guess = text[1:-1]
-        if guess == "apos":
-            guess = "lsquo"
-        numero = n2c[guess]
-        try:
-            text = chr(numero)
-        except KeyError:
-            pass
+        if guess == "quot":
+            return '"'
+        else:
+            return chr(n2c[guess])
     return text
-
 
 def filter_status(text):
     text = re.sub(r'\b(RT|MT) .+', '', text)  # take out anything after RT or MT
     text = re.sub(r'(\#|@|(h\/t)|(http))\S+', '', text)  # Take out URLs, hashtags, hts, etc.
-    text = re.sub('\s+', ' ', text)  # collaspse consecutive whitespace to single spaces.
+    text = re.sub(r'\s+', ' ', text)  # collapse consecutive whitespace to single spaces.
     text = re.sub(r'\"|\(|\)', '', text)  # take out quotes.
     text = re.sub(r'\s+\(?(via|says)\s@\w+\)?', '', text)  # remove attribution
     text = re.sub(r'<[^>]*>','', text) #strip out html tags from mastodon posts
     htmlsents = re.findall(r'&\w+;', text)
     for item in htmlsents:
         text = text.replace(item, entity(item))
-    text = re.sub(r'\xe9', 'e', text)  # take out accented e
-    return text
-
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 def scrape_page(src_url, web_context, web_attributes):
-    tweets = []
-    last_url = ""
-    for i in range(len(src_url)):
-        if src_url[i] != last_url:
-            last_url = src_url[i]
-            print(">>> Scraping {0}".format(src_url[i]))
-            try:
-                page = urlopen(src_url[i])
-            except Exception:
-                last_url = "ERROR"
-                import traceback
-                print(">>> Error scraping {0}:".format(src_url[i]))
-                print(traceback.format_exc())
-                continue
-            soup = BeautifulSoup(page, 'html.parser')
-        hits = soup.find_all(web_context[i], attrs=web_attributes[i])
-        if not hits:
-            print(">>> No results found!")
+    source_statuses = []
+    if not isinstance(src_url, list):
+        src_url = [src_url]
+    if not isinstance(web_context, list):
+        web_context = [web_context]
+    if not isinstance(web_attributes, list):
+        web_attributes = [web_attributes]
+    for url, context, attribute in zip(src_url, web_context, web_attributes):
+        print("Scraping {0}".format(url))
+        try:
+            page = urlopen(url)
+        except Exception as e:
+            print("Cannot open URL: {0}".format(e))
             continue
+        soup = BeautifulSoup(page, 'html.parser')
+        soup = soup.find(context, attribute)
+        if soup:
+            soup = soup.text
+            if soup:
+                source_statuses += soup.split(".")
         else:
-            errors = 0
-            for hit in hits:
-                try:
-                    tweet = str(hit.text).strip()
-                except (UnicodeEncodeError, UnicodeDecodeError):
-                    errors += 1
-                    continue
-                if tweet:
-                    tweets.append(tweet)
-            if errors > 0:
-                print(">>> We had trouble reading {} result{}.".format(errors, "s" if errors > 1 else ""))
-    return(tweets)
+            print("Couldn't find the content")
+    return source_statuses
 
-
-def grab_tweets(api, max_id=None):
-    source_tweets = []
-    user_tweets = api.GetUserTimeline(screen_name=user, count=200, max_id=max_id, include_rts=True, trim_user=True, exclude_replies=True)
-    if user_tweets:
-        max_id = user_tweets[-1].id - 1
-        for tweet in user_tweets:
-            if tweet.full_text:
-                tweet.text = filter_status(tweet.full_text)
-            else:
-                tweet.text = filter_status(tweet.full_text)
-            if re.search(SOURCE_EXCLUDE, tweet.text):
-                continue
-            if tweet.text:
-                source_tweets.append(tweet.text)
-    else:
-        pass
-    return source_tweets, max_id
-
-def grab_tweets_v2(api, handle):
-    twitter_tweets = []
-    id = api.get_user(username=handle).data.id
-    for tweet in tweepy.Paginator(api.get_users_tweets, id, exclude=['retweets', 'replies'],
-                                  max_results=100).flatten(limit=TWEETS_TO_GRAB):
-        tweet_text = filter_status(tweet.text)
-        if re.search(SOURCE_EXCLUDE, tweet_text):
-            continue
-        if tweet_text:
-            twitter_tweets.append(tweet_text)
-    return twitter_tweets
-
-def grab_toots(api, account_id=None,max_id=None):
-    if account_id:
+def grab_toots(api, account_handle=None):
+    """Retrieve posts from a Mastodon account"""
+    if not account_handle:
+        return []
+    
+    try:
+        # First, search for the account to get its ID
+        print(f"Looking up Mastodon account: {account_handle}")
+        # Remove the @ from the start if present
+        if account_handle.startswith('@'):
+            account_handle = account_handle[1:]
+            
+        # Split the handle into username and domain
+        if '@' in account_handle:
+            username, domain = account_handle.split('@')
+            if domain != MASTODON_API_BASE_URL.split('://')[-1]:
+                print(f"Warning: Account domain {domain} doesn't match API URL {MASTODON_API_BASE_URL}")
+        
+        accounts = api.account_lookup(account_handle)
+        if not accounts:
+            print(f"Could not find Mastodon account: {account_handle}")
+            return []
+            
+        account_id = accounts.id
+        print(f"Found account ID: {account_id}")
+        
+        # Now fetch the account's posts
         source_toots = []
-        user_toots = api.account_statuses(account_id)
-        max_id = user_toots[len(user_toots)-1]['id']-1
+        user_toots = api.account_statuses(account_id, exclude_replies=True, exclude_reblogs=True)
+        
         for toot in user_toots:
-            if toot['in_reply_to_id'] or toot['reblog']:
-                pass #skip this one
-            else:
-                toot['content'] = filter_status(toot['content'])
-                if len(toot['content']) != 0:
-                    source_toots.append(toot['content'])
-        return source_toots, max_id
+            if toot and hasattr(toot, 'content'):
+                content = filter_status(toot.content)
+                if content:
+                    source_toots.append(content)
+        
+        print(f"Retrieved {len(source_toots)} toots from {account_handle}")
+        return source_toots
+    except Exception as e:
+        print(f"Error getting Mastodon posts from {account_handle}: {str(e)}")
+        return []
+
+def grab_bluesky_posts(api, handle=None):
+    """Retrieve posts from a Bluesky account"""
+    if not handle:
+        return []
+        
+    try:
+        print(f"Looking up Bluesky account: {handle}")
+        # Remove @ if present and ensure proper handle format
+        if handle.startswith('@'):
+            handle = handle[1:]
+            
+        # Make sure handle has .bsky.social if no domain specified
+        if '.' not in handle:
+            handle = f"{handle}.bsky.social"
+            
+        print(f"Formatted handle: {handle}")
+        
+        # Get the DID first
+        profile = api.com.atproto.identity.resolve_handle({'handle': handle})
+        if not profile or not profile.did:
+            print(f"Could not find Bluesky account: {handle}")
+            return []
+            
+        did = profile.did
+        print(f"Found DID: {did}")
+        
+        # Now get their posts using the timeline endpoint
+        feed = api.app.bsky.feed.get_author_feed({
+            'actor': did,
+            'limit': 100  # Get more posts
+        })
+        
+        if not feed or not hasattr(feed, 'feed'):
+            print(f"No posts found for {handle}")
+            return []
+            
+        source_posts = []
+        for post in feed.feed:
+            if (hasattr(post, 'post') and 
+                hasattr(post.post, 'record') and 
+                hasattr(post.post.record, 'text')):
+                text = post.post.record.text
+                # Skip replies and reposts
+                if not text.startswith('@') and 'rt' not in text.lower():
+                    # Clean up the text
+                    text = re.sub(r'https://\S+', '', text)  # Remove URLs
+                    text = re.sub(r'@\w+', '', text)  # Remove mentions
+                    text = re.sub(r'\s+', ' ', text).strip()  # Clean whitespace
+                    if text:  # Only add non-empty posts
+                        source_posts.append(text)
+                    
+        print(f"Retrieved {len(source_posts)} posts from {handle}")
+        if DEBUG and source_posts:
+            print("Sample posts:")
+            for i, post in enumerate(source_posts[:3]):
+                print(f"  {i+1}. {post}")
+                
+        return source_posts
+    except Exception as e:
+        print(f"Error getting Bluesky posts: {str(e)}")
+        if DEBUG:
+            import traceback
+            traceback.print_exc()
+        return []
 
 if __name__ == "__main__":
-    order = ORDER
-    guess = 0
-    if ODDS and not DEBUG:
-        guess = random.randint(0, ODDS - 1)
+    if DEBUG:
+        print("\n[DEBUG MODE] Running in debug mode - no posts will be made\n")
+    
+    # Set a random seed based on current time
+    random.seed()
+    
+    print("Retrieving source texts...")
+    
+    try:
+        mastodon_api = connect('mastodon')
+        bluesky_api = connect('bluesky')
 
-    if guess:
-        print(str(guess) + " No, sorry, not this time.")  # message if the random number fails.
-        sys.exit()
-    else:
-        api = connect()         
-        if ENABLE_MASTODON_SOURCES or ENABLE_MASTODON_POSTING:
-            mastoapi = connect(type='mastodon')
         source_statuses = []
+
+        # Get tweets from static file if enabled
         if STATIC_TEST:
-            file = TEST_SOURCE
-            print(">>> Generating from {0}".format(file))
-            string_list = open(file).readlines()
-            for item in string_list:
-                source_statuses += item.split(",")
-        if SCRAPE_URL:
-            source_statuses += scrape_page(SRC_URL, WEB_CONTEXT, WEB_ATTRIBUTES)
-        if ENABLE_TWITTER_SOURCES and TWITTER_SOURCE_ACCOUNTS and len(TWITTER_SOURCE_ACCOUNTS[0]) > 0 and TWITTER_API_VERSION == 'v2':
-            for handle in TWITTER_SOURCE_ACCOUNTS:
-                source_statuses += grab_tweets_v2(api,handle)
-        elif ENABLE_TWITTER_SOURCES and TWITTER_SOURCE_ACCOUNTS and len(TWITTER_SOURCE_ACCOUNTS[0]) > 0:
-            twitter_tweets = []
-            for handle in TWITTER_SOURCE_ACCOUNTS:
-                user = handle
-                handle_stats = api.GetUser(screen_name=user)
-                status_count = handle_stats.statuses_count
-                max_id = None
-                my_range = min(17, int((status_count/200) + 1))
-                for x in range(1, my_range):
-                    twitter_tweets_iter, max_id = grab_tweets(api, max_id)
-                    twitter_tweets += twitter_tweets_iter
-                print("{0} tweets found in {1}".format(len(twitter_tweets), handle))
-                if not twitter_tweets:
-                    print("Error fetching tweets from Twitter. Aborting.")
-                    sys.exit()
-                else:
-                    source_statuses += twitter_tweets
-        if ENABLE_MASTODON_SOURCES and len(MASTODON_SOURCE_ACCOUNTS) > 0:
-            source_toots = []
-            max_id=None
-            for handle in MASTODON_SOURCE_ACCOUNTS:
-                accounts = mastoapi.account_search(handle)
-                if len(accounts) != 1:
-                    pass # Ambiguous search
-                else:
-                    account_id = accounts[0]['id']
-                    num_toots = accounts[0]['statuses_count']
-                    if num_toots < 3200:
-                        my_range = int((num_toots/200)+1)
-                    else:
-                        my_range = 17
-                    for x in range(my_range)[1:]:
-                        source_toots_iter, max_id = grab_toots(mastoapi,account_id, max_id=max_id)
-                        source_toots += source_toots_iter
-                    print("{0} toots found from {1}".format(len(source_toots), handle))
-                    if len(source_toots) == 0:
-                        print("Error fetching toots for %s. Aborting." % handle)
-                        sys.exit()
-            source_statuses += source_toots
+            print("\nReading from static file:", TEST_SOURCE)
+            try:
+                with open(TEST_SOURCE, 'r', encoding='utf8') as f:
+                    text = f.read()
+                    # Split on newlines and clean up each tweet
+                    tweets = []
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line:
+                            # Remove the trailing comma and clean up quotes
+                            line = line.rstrip(',').strip()
+                            if line.startswith("'") and line.endswith("'"):
+                                line = line[1:-1]
+                            # Remove t.co URLs
+                            line = re.sub(r'https://t\.co/\w+', '', line)
+                            # Remove mentions for better text generation
+                            line = re.sub(r'@\w+', '', line)
+                            # Clean up extra whitespace
+                            line = re.sub(r'\s+', ' ', line).strip()
+                            if line:  # Only add non-empty lines
+                                tweets.append(line)
+                                
+                    print(f"Found {len(tweets)} tweets in {TEST_SOURCE}")
+                    if DEBUG:
+                        print("\nSample tweets after cleaning:")
+                        for i, tweet in enumerate(tweets[:3]):
+                            print(f"{i+1}. {tweet}")
+                    source_statuses.extend(tweets)
+            except Exception as e:
+                print(f"Error reading {TEST_SOURCE}: {str(e)}")
+        
+        # Get posts from Mastodon if enabled
+        if ENABLE_MASTODON_SOURCES and mastodon_api and MASTODON_SOURCE_ACCOUNTS:
+            print("\nFetching Mastodon posts...")
+            mastodon_accounts = MASTODON_SOURCE_ACCOUNTS.strip('[]').replace('"', '').split(',')
+            for account_handle in mastodon_accounts:
+                if account_handle.strip():
+                    source_statuses.extend(grab_toots(mastodon_api, account_handle.strip()))
+                    
+        # Get posts from Bluesky if enabled
+        if ENABLE_BLUESKY_SOURCES and bluesky_api and BLUESKY_SOURCE_ACCOUNTS:
+            print("\nFetching Bluesky posts...")
+            bluesky_accounts = BLUESKY_SOURCE_ACCOUNTS.strip('[]').replace('"', '').split(',')
+            for handle in bluesky_accounts:
+                if handle.strip():
+                    source_statuses.extend(grab_bluesky_posts(bluesky_api, handle.strip()))
+
         if len(source_statuses) == 0:
-            print("No statuses found!")
+            print("Error: No source texts found!")
+            sys.exit(1)
+
+        print(f"\nFound {len(source_statuses)} total source texts")
+        if DEBUG:
+            print("\nSample of combined source texts:")
+            for i, status in enumerate(random.sample(source_statuses, min(3, len(source_statuses)))):
+                print(f"{i+1}. {status}")
+        
+        order = ORDER
+        guess = 0
+        if ODDS and not DEBUG:
+            guess = random.randint(0, ODDS - 1)
+
+        if guess:
+            print(str(guess) + " No, sorry, not this time.")  # message if the random number fails.
             sys.exit()
-        mine = markov.MarkovChainer(order)
-        for status in source_statuses:
-            if not re.search('([\.\!\?\"\']$)', status):
-                status += "."
-            mine.add_text(status)
-        for x in range(0, 10):
-            ebook_status = mine.generate_sentence()
-
-        # randomly drop the last word, as Horse_ebooks appears to do.
-        if random.randint(0, 4) == 0 and re.search(r'(in|to|from|for|with|by|our|of|your|around|under|beyond)\s\w+$', ebook_status) is not None:
-            print("Losing last word randomly")
-            ebook_status = re.sub(r'\s\w+.$', '', ebook_status)
-            print(ebook_status)
-
-        # if a tweet is very short, this will randomly add a second sentence to it.
-        if ebook_status is not None and len(ebook_status) < 40:
-            rando = random.randint(0, 10)
-            if rando == 0 or rando == 7:
-                print("Short tweet. Adding another sentence randomly")
-                newer_status = mine.generate_sentence()
-                if newer_status is not None:
-                    ebook_status += " " + mine.generate_sentence()
-                else:
-                    ebook_status = ebook_status
-            elif rando == 1:
-                # say something crazy/prophetic in all caps
-                print("ALL THE THINGS")
-                ebook_status = ebook_status.upper()
-
-        # throw out tweets that match anything from the source account.
-        if ebook_status is not None and len(ebook_status) < 210:
+        else:
+            mine = markov.MarkovChainer(order)
             for status in source_statuses:
-                if ebook_status[:-1] not in status:
-                    continue
-                else:
-                    print("TOO SIMILAR: " + ebook_status)
+                if not re.search(SOURCE_EXCLUDE, status):
+                    mine.add_text(status)
+
+            for x in range(0, 10):
+                ebook_status = mine.generate_sentence()
+
+                if ebook_status:
+                    # randomly drop the last word, as Horse_ebooks appears to do
+                    if random.randint(0, 4) == 0 and re.search(r'(in|to|from|for|with|by|our|of|your|around|under|beyond)\s\w+$', ebook_status) is not None:
+                        print("Losing last word randomly")
+                        ebook_status = re.sub(r'\s\w+.$', '', ebook_status)
+
+                    # if it's very short, try to add another sentence
+                    if len(ebook_status) < 40:
+                        print("Short status, trying to add another sentence")
+                        second_sentence = mine.generate_sentence()
+                        if second_sentence:
+                            ebook_status += " " + second_sentence
+
+                    # Remove scary values
+                    ebook_status = ebook_status.replace("|", "I")
+                    ebook_status = ebook_status.replace("&gt;", ">")
+                    ebook_status = ebook_status.replace("&lt;", "<")
+
+                    print("\nGenerated status: " + ebook_status + "\n")
+                    
+                    if DEBUG:
+                        print("[DEBUG MODE] Would have posted to:")
+                        if ENABLE_MASTODON_POSTING and mastodon_api:
+                            print("- Mastodon")
+                        if ENABLE_BLUESKY_POSTING and bluesky_api:
+                            print("- Bluesky")
+                    else:
+                        if ENABLE_MASTODON_POSTING and mastodon_api:
+                            try:
+                                mastodon_api.toot(ebook_status)
+                                print("Posted to Mastodon successfully!")
+                            except Exception as e:
+                                print(f"Error posting to Mastodon: {str(e)}")
+                                
+                        if ENABLE_BLUESKY_POSTING and bluesky_api:
+                            try:
+                                record = {
+                                    '$type': 'app.bsky.feed.post',
+                                    'text': ebook_status,
+                                    'createdAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                }
+                                
+                                bluesky_api.com.atproto.repo.create_record({
+                                    'repo': bluesky_api.me.did,
+                                    'collection': 'app.bsky.feed.post',
+                                    'record': record
+                                })
+                                print("Posted to Bluesky successfully!")
+                            except Exception as e:
+                                print(f"Error posting to Bluesky: {str(e)}")
+
                     sys.exit()
 
-            if not DEBUG:
-                if ENABLE_TWITTER_POSTING and TWITTER_API_VERSION=='v2':
-                    status = api.create_tweet(text=ebook_status)
-                elif ENABLE_TWITTER_POSTING:
-                    status = api.PostUpdate(ebook_status)
-                if ENABLE_MASTODON_POSTING:
-                    status = mastoapi.toot(ebook_status)
-            print(ebook_status)
-
-        elif not ebook_status:
-            print("Status is empty, sorry.")
-        else:
-            print("TOO LONG: " + ebook_status)
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        sys.exit(1)

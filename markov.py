@@ -47,8 +47,13 @@ class MarkovChainer(object):
 
     # Generate the goofy sentences that become your tweet.
     def generate_sentence(self):
+        if not self.beginnings:
+            return None
+            
+        # Choose a random beginning
         res = random.choice(self.beginnings)
         res = res[:]
+        
         if len(res) == self.order:
             nw = True
             while nw is not None:
@@ -61,6 +66,7 @@ class MarkovChainer(object):
                         continue
                 except Exception:
                     nw = False
+                    
             new_res = res[0:-2]
             if new_res[0].istitle() or new_res[0].isupper():
                 pass
