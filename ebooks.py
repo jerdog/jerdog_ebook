@@ -38,6 +38,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Global API clients
+mastodon_client = None
+bluesky_client = None
+
 def connect(platform):
     """
     Connect to a social media platform's API.
@@ -48,17 +52,44 @@ def connect(platform):
     Returns:
         API client object or None if connection fails
     """
+    global mastodon_client, bluesky_client
+    
     try:
         if platform == 'mastodon' and ENABLE_MASTODON_POSTING:
-            return Mastodon(
+            if mastodon_client:
+                return mastodon_client
+                
+            if not MASTODON_API_BASE_URL:
+                logger.error("Mastodon API base URL is not configured")
+                return None
+                
+            mastodon_client = Mastodon(
+                client_id=MASTODON_KEY,
+                client_secret=MASTODON_SECRET,
                 access_token=MASTODON_TOKEN,
                 api_base_url=MASTODON_API_BASE_URL
             )
+            return mastodon_client
+            
         elif platform == 'bluesky' and ENABLE_BLUESKY_POSTING:
-            return Client(BLUESKY_UID, BLUESKY_PWD)
+            if bluesky_client:
+                return bluesky_client
+                
+            if not BLUESKY_UID or not BLUESKY_PWD:
+                logger.error("Bluesky credentials are not configured")
+                return None
+                
+            client = Client()
+            client.login(BLUESKY_UID, BLUESKY_PWD)
+            bluesky_client = client
+            return client
+            
         return None
     except Exception as e:
         logger.error(f"Error connecting to {platform}: {str(e)}")
+        if DEBUG:
+            import traceback
+            traceback.print_exc()
         return None
 
 def grab_toots(api, account_handle):
@@ -73,35 +104,24 @@ def grab_toots(api, account_handle):
         list: List of post texts
     """
     try:
-        # Strip @ from handle if present
-        if account_handle.startswith('@'):
-            account_handle = account_handle[1:]
-            
         logger.info(f"Fetching posts from Mastodon account: {account_handle}")
         
-        # Get account ID
-        account = api.account_lookup(account_handle)
-        if not account:
-            logger.error(f"Could not find Mastodon account: {account_handle}")
-            return []
-            
-        # Get posts
-        posts = api.account_statuses(account.id, limit=40)
-        source_posts = []
+        # Remove brackets and quotes if present
+        if isinstance(account_handle, list):
+            account_handle = account_handle[0]
+        account_handle = account_handle.strip('[]"\' ')
         
-        for post in posts:
-            if post.content:
-                # Clean up the HTML content
-                text = BeautifulSoup(post.content, 'html.parser').get_text()
-                # Skip replies and boosts
-                if not text.startswith('@') and not hasattr(post, 'reblog'):
-                    # Clean up the text
-                    text = clean_text(text)
-                    if text:
-                        source_posts.append(text)
-                        
-        logger.info(f"Retrieved {len(source_posts)} posts from {account_handle}")
-        return source_posts
+        # Remove @ from start if present
+        account_handle = account_handle.lstrip('@')
+        
+        # Get account ID
+        account_id = api.account_search(account_handle)[0]['id']
+        
+        # Get posts
+        posts = api.account_statuses(account_id)
+        
+        # Clean and return post texts
+        return [clean_text(post['content']) for post in posts if post['content']]
         
     except Exception as e:
         logger.error(f"Error getting Mastodon posts: {str(e)}")
@@ -118,58 +138,39 @@ def grab_bluesky_posts(api, handle):
     Returns:
         list: List of post texts
     """
-    if not handle:
-        return []
-        
     try:
         logger.info(f"Looking up Bluesky account: {handle}")
         
-        # Remove @ if present and ensure proper handle format
-        if handle.startswith('@'):
-            handle = handle[1:]
-        if '.' not in handle:
-            handle = f"{handle}.bsky.social"
-            
+        # Clean up handle
+        if isinstance(handle, list):
+            handle = handle[0]
+        handle = handle.strip('[]"\' ')
+        
         logger.info(f"Formatted handle: {handle}")
         
-        # Get the DID first
-        profile = api.com.atproto.identity.resolve_handle({'handle': handle})
-        if not profile or not profile.did:
-            logger.error(f"Could not find Bluesky account: {handle}")
-            return []
-            
-        did = profile.did
-        logger.info(f"Found DID: {did}")
+        # Resolve DID
+        response = api.com.atproto.identity.resolve_handle({'handle': handle})
+        did = response.did
         
-        # Get their posts
-        feed = api.app.bsky.feed.get_author_feed({
+        # Get posts (limit to 100 as per API restriction)
+        posts = []
+        response = api.app.bsky.feed.get_author_feed({
             'actor': did,
-            'limit': 100
+            'limit': 100,  # Maximum allowed by API
+            'filter': 'posts_no_replies'  # Exclude replies for better source text
         })
         
-        if not feed or not hasattr(feed, 'feed'):
-            logger.error(f"No posts found for {handle}")
-            return []
-            
-        source_posts = []
-        for post in feed.feed:
-            if (hasattr(post, 'post') and 
-                hasattr(post.post, 'record') and 
-                hasattr(post.post.record, 'text')):
-                text = post.post.record.text
-                # Skip replies and reposts
-                if not text.startswith('@') and 'rt' not in text.lower():
-                    text = clean_text(text)
-                    if text:
-                        source_posts.append(text)
+        if hasattr(response, 'feed'):
+            for post in response.feed:
+                if (hasattr(post, 'post') and 
+                    hasattr(post.post, 'record') and 
+                    hasattr(post.post.record, 'text')):
+                    text = clean_text(post.post.record.text)
+                    if text:  # Only add non-empty texts
+                        posts.append(text)
                     
-        logger.info(f"Retrieved {len(source_posts)} posts from {handle}")
-        if DEBUG and source_posts:
-            logger.debug("Sample posts:")
-            for i, post in enumerate(source_posts[:3]):
-                logger.debug(f"  {i+1}. {post}")
-                
-        return source_posts
+        logger.info(f"Retrieved {len(posts)} posts from {handle}")
+        return posts
         
     except Exception as e:
         logger.error(f"Error getting Bluesky posts: {str(e)}")
@@ -293,20 +294,36 @@ def post_text(text, platform_api, platform_name):
         
     try:
         if platform_name == 'mastodon':
+            if not hasattr(platform_api, 'status_post'):
+                logger.error("Invalid Mastodon API client")
+                return False
             platform_api.status_post(text)
         elif platform_name == 'bluesky':
+            if not hasattr(platform_api, 'me') or not platform_api.me:
+                logger.error("Not logged in to Bluesky")
+                return False
+                
+            # Create post record
+            record = {
+                '$type': 'app.bsky.feed.post',
+                'text': text,
+                'createdAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'langs': ['en']
+            }
+            
             platform_api.com.atproto.repo.create_record({
                 'repo': platform_api.me.did,
                 'collection': 'app.bsky.feed.post',
-                'record': {
-                    'text': text,
-                    'createdAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-                }
+                'record': record
             })
+            
         logger.info(f"Posted to {platform_name}: {text}")
         return True
     except Exception as e:
         logger.error(f"Error posting to {platform_name}: {str(e)}")
+        if DEBUG:
+            import traceback
+            traceback.print_exc()
         return False
 
 def main():
@@ -316,7 +333,9 @@ def main():
         
     # Random chance of running
     if ODDS and not DEBUG:
-        if random.randint(0, ODDS - 1) != 0:
+        if random.randint(0, ODDS - 1) == 0:  # 1/N chance of running
+            logger.info("Running this time!")
+        else:
             logger.info("Not running this time")
             return
             
@@ -330,11 +349,13 @@ def main():
     if not DEBUG:
         if ENABLE_MASTODON_POSTING:
             mastodon_api = connect('mastodon')
-            post_text(text, mastodon_api, 'mastodon')
+            if mastodon_api:
+                post_text(text, mastodon_api, 'mastodon')
             
         if ENABLE_BLUESKY_POSTING:
             bluesky_api = connect('bluesky')
-            post_text(text, bluesky_api, 'bluesky')
+            if bluesky_api:
+                post_text(text, bluesky_api, 'bluesky')
     else:
         logger.info("[DEBUG] Would have posted:")
         logger.info(text)
