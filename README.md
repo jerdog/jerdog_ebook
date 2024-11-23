@@ -126,6 +126,58 @@ Edit `wrangler.toml` to configure:
 - Compatibility date
 - Environment variables
 
+## Remote Triggering
+
+The worker can be triggered manually using the `/generate` endpoint:
+
+### Setting up API Secret
+
+1. Generate a secure random string (UUID recommended):
+   ```bash
+   node -e "console.log(crypto.randomUUID())"
+   ```
+
+2. Set it as a worker secret:
+   ```bash
+   npx wrangler secret put API_SECRET
+   ```
+
+### Available Endpoints
+
+1. Generate Posts (Authenticated):
+   ```bash
+   curl -X POST https://your-worker-url/generate \
+     -H "Authorization: Bearer your-api-secret" \
+     -H "Content-Type: application/json"
+   ```
+
+2. Add Training Data:
+   ```bash
+   curl -X POST https://your-worker-url \
+     -H "Content-Type: application/json" \
+     -d '{"text":"Your training text here"}'
+   ```
+
+### Response Format
+
+The `/generate` endpoint returns JSON:
+```json
+{
+  "success": true,
+  "message": "Posted successfully",
+  "post": "Generated text content",
+  "sourceCount": 123
+}
+```
+
+Or in case of error:
+```json
+{
+  "success": false,
+  "error": "Error message"
+}
+```
+
 ## Text Generation
 
 The bot uses order-2 Markov chains with multiple data sources:

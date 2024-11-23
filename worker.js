@@ -220,8 +220,117 @@ function cleanText(text) {
     .replace(/http\S+|www\.\S+/g, '') // Remove URLs
     .replace(/@\S+/g, '') // Remove mentions
     .replace(/<[^>]+>/g, '') // Remove HTML tags
+    .replace(/&quot;/g, '"') // Convert HTML entities
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&apos;/g, "'")
     .replace(/\s+/g, ' ') // Remove extra whitespace
+    .replace(/[^\S\r\n]+/g, ' ') // Normalize spaces
+    .replace(/\s*([,.!?])\s*/g, '$1 ') // Fix punctuation spacing
+    .replace(/\s+-\s+/g, ' ') // Remove dangling hyphens
+    .replace(/\s*\|\s*/g, ' ') // Remove pipe characters
     .trim();
+}
+
+// Text style configuration
+const TEXT_STYLES = {
+  professional: {
+    minSentenceWords: 5,
+    maxSentenceWords: 20,
+    preferredEndings: ['.', '!'],
+    hashtagProbability: 0.3,
+    emojiProbability: 0.1,
+    allowedEmojis: ['💡', '🚀', '💪', '✨', '🎯', '📈', '🔥', '👨‍💻', '🤝', '💭'],
+    topicalHashtags: ['#DevEx', '#DevRel', '#Community', '#Tech', '#Development', '#Innovation']
+  },
+  casual: {
+    minSentenceWords: 3,
+    maxSentenceWords: 15,
+    preferredEndings: ['!', '...', '?'],
+    hashtagProbability: 0.5,
+    emojiProbability: 0.4,
+    allowedEmojis: ['😊', '🎉', '👋', '🙌', '😄', '💯', '🎈', '✌️', '🌟', '💫'],
+    topicalHashtags: ['#coding', '#techlife', '#developer', '#opensource', '#community']
+  },
+  technical: {
+    minSentenceWords: 8,
+    maxSentenceWords: 25,
+    preferredEndings: ['.'],
+    hashtagProbability: 0.2,
+    emojiProbability: 0,
+    allowedEmojis: [],
+    topicalHashtags: ['#Programming', '#Architecture', '#Engineering', '#CodeQuality', '#BestPractices']
+  }
+};
+
+function postProcessText(text, style = 'professional') {
+  // Get style configuration
+  const styleConfig = TEXT_STYLES[style] || TEXT_STYLES.professional;
+  
+  // Remove repeated phrases (3 or more words)
+  const words = text.split(' ');
+  const minPhraseLength = 3;
+  const cleanedWords = [];
+  
+  for (let i = 0; i < words.length; i++) {
+    let isDuplicate = false;
+    for (let j = minPhraseLength; j <= 5; j++) {
+      if (i + j > words.length) continue;
+      const phrase = words.slice(i, i + j).join(' ');
+      const restOfText = words.slice(i + j).join(' ');
+      if (restOfText.includes(phrase)) {
+        isDuplicate = true;
+        break;
+      }
+    }
+    if (!isDuplicate) {
+      cleanedWords.push(words[i]);
+    }
+  }
+
+  let result = cleanedWords.join(' ')
+    // Ensure proper sentence endings
+    .replace(/([^.!?])\s*$/g, '$1' + styleConfig.preferredEndings[Math.floor(Math.random() * styleConfig.preferredEndings.length)])
+    // Fix multiple punctuation
+    .replace(/([.!?])\1+/g, '$1')
+    .replace(/\s*([.!?,])\s*/g, '$1 ')
+    // Split into sentences and filter by length
+    .split(/[.!?]\s+/)
+    .filter(sentence => {
+      const wordCount = sentence.split(/\s+/).length;
+      return wordCount >= styleConfig.minSentenceWords && wordCount <= styleConfig.maxSentenceWords;
+    })
+    .join('. ')
+    .trim();
+
+  // Only add style elements if the text is long enough
+  if (result.length >= 50) {
+    // Add hashtags
+    if (Math.random() < styleConfig.hashtagProbability) {
+      const hashtag = styleConfig.topicalHashtags[Math.floor(Math.random() * styleConfig.topicalHashtags.length)];
+      result += ` ${hashtag}`;
+    }
+
+    // Add emojis
+    if (styleConfig.allowedEmojis.length > 0 && Math.random() < styleConfig.emojiProbability) {
+      const emoji = styleConfig.allowedEmojis[Math.floor(Math.random() * styleConfig.allowedEmojis.length)];
+      // 50% chance at start, 50% chance at end
+      if (Math.random() < 0.5) {
+        result = `${emoji} ${result}`;
+      } else {
+        result = `${result} ${emoji}`;
+      }
+    }
+  }
+
+  // Ensure it ends with punctuation
+  if (!/[.!?]$/.test(result)) {
+    result += styleConfig.preferredEndings[0];
+  }
+
+  // Only return if it meets minimum length
+  return result.length >= 100 ? result : null;
 }
 
 function extractTextFromHtml(html) {
@@ -237,6 +346,34 @@ export default {
   async fetch(request, env, ctx) {
     // Handle POST requests to add training data
     if (request.method === 'POST') {
+      const url = new URL(request.url);
+      
+      // Handle /generate endpoint
+      if (url.pathname === '/generate') {
+        try {
+          // Optional auth check
+          const authHeader = request.headers.get('Authorization');
+          if (!authHeader || authHeader !== `Bearer ${env.API_SECRET}`) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+              status: 401,
+              headers: { 'content-type': 'application/json' }
+            });
+          }
+
+          // Run the scheduled handler directly
+          const result = await this.scheduled(null, env, ctx);
+          return new Response(JSON.stringify(result), {
+            headers: { 'content-type': 'application/json' }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: error.message }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+      }
+
+      // Handle training data upload
       try {
         const { text } = await request.json();
         if (!text) {
@@ -264,14 +401,23 @@ export default {
       }
     }
 
-    return new Response("Social Media Markov Bot - Use the scheduled handler to generate posts or POST to add training data", {
-      headers: { "content-type": "text/plain" },
-    });
+    // List available endpoints
+    return new Response(
+      "Social Media Markov Bot\n\n" +
+      "Available endpoints:\n" +
+      "- POST /generate: Generate and post new content (requires API_SECRET)\n" +
+      "- POST /: Add training data\n" +
+      "\nScheduled posts run every 2 hours automatically.",
+      {
+        headers: { "content-type": "text/plain" },
+      }
+    );
   },
 
   async scheduled(event, env, ctx) {
     try {
-      if (!shouldPost()) {
+      // Only use odds for scheduled posts, not manual triggers
+      if (event && !shouldPost()) {
         return { success: true, message: 'Skipped posting based on odds' };
       }
 
@@ -306,21 +452,47 @@ export default {
         throw new Error('No source texts found');
       }
 
-      // Generate new post
+      // Generate new post with enhanced cleaning
       const generator = new MarkovGenerator(sourceTexts, 2);
-      const newPost = generator.generate();
+      let newPost = null;
+      let attempts = 0;
+      const maxAttempts = 5;
+      let style;
+
+      while (!newPost && attempts < maxAttempts) {
+        // Randomly select a style, weighted towards professional
+        const styleRoll = Math.random();
+        if (styleRoll < 0.6) {
+          style = 'professional';
+        } else if (styleRoll < 0.8) {
+          style = 'casual';
+        } else {
+          style = 'technical';
+        }
+
+        let generatedText = generator.generate();
+        newPost = postProcessText(generatedText, style);
+        attempts++;
+      }
+
+      if (!newPost) {
+        throw new Error('Failed to generate valid post after multiple attempts');
+      }
 
       // Post to platforms
       const blueskySuccess = await bluesky.createPost(newPost);
       const mastodonSuccess = await mastodon.createPost(newPost);
 
       return {
-        success: blueskySuccess && mastodonSuccess,
+        success: blueskySuccess || mastodonSuccess,
         message: 'Posted successfully',
         post: newPost,
+        style: style,
+        attempts: attempts,
         sourceCount: sourceTexts.length
       };
     } catch (error) {
+      console.error('Error in scheduled task:', error);
       return {
         success: false,
         error: error.message
