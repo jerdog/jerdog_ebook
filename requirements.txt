@@ -1,4 +1,0 @@
-Mastodon.py
-beautifulsoup4
-atproto
-python-dotenv

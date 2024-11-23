@@ -1,0 +1,24 @@
+name = "social-media-markov-bot"
+main = "worker.js"
+compatibility_date = "2023-01-01"
+
+kv_namespaces = [
+  { binding = "TRAINING_DATA", id = "training-data" }
+]
+
+[triggers]
+cron = "0 */2 * * *"
+
+[vars]
+# These will be set via `wrangler secret put` command
+# BLUESKY_UID
+# BLUESKY_PWD
+# BLUESKY_SOURCE_ACCOUNTS
+# MASTODON_CLIENT_KEY
+# MASTODON_CLIENT_SECRET
+# MASTODON_ACCESS_TOKEN
+# MASTODON_API_BASE_URL
+# MASTODON_SOURCE_ACCOUNTS
+
+[observability.logs]
+enabled = true
