@@ -10,24 +10,21 @@ A Cloudflare Workers-based social media bot that generates and posts content usi
   - Bluesky integration with optimized API usage
   - Mastodon integration with HTML content handling
 - Advanced Markov chain text generation:
-  - Configurable chain order
-  - Improved text cleaning
+  - Order-2 Markov chains for natural text flow
+  - Sophisticated text cleaning
   - Natural language output
-- Flexible source text collection:
-  - Live post retrieval from social platforms
-  - Filtered content (no replies, better quality)
-- Smart configuration:
-  - Environment-based credentials
-  - Platform-specific settings
-  - Debug and test modes
-- Performance optimizations:
-  - Serverless execution
-  - Efficient API usage
+- Training data management:
+  - KV storage for training corpus
+  - CSV to text conversion utilities
+  - Automatic text cleaning and filtering
+- Smart scheduling:
+  - 2-hour posting intervals
+  - 50% posting probability
   - Rate limit compliance
-- Comprehensive logging:
-  - Detailed error reporting
-  - Debug output options
-  - Operation tracking
+- Serverless architecture:
+  - Cloudflare Workers runtime
+  - KV namespace storage
+  - Minimal resource usage
 
 ## Setup
 
@@ -65,10 +62,51 @@ A Cloudflare Workers-based social media bot that generates and posts content usi
    wrangler secret put MASTODON_API_BASE_URL
    ```
 
-6. Deploy:
+6. Process and upload training data:
+   ```bash
+   # Convert CSV to text
+   node convert-csv.js
+
+   # Upload to KV namespace
+   node add-training-data.js
+   ```
+
+7. Deploy:
    ```bash
    wrangler deploy
    ```
+
+## Training Data
+
+The bot uses two types of training data:
+
+1. **Static Training Corpus**:
+   - Stored in Cloudflare KV
+   - Processed from tweets.csv
+   - Cleaned and filtered text
+   - No URLs, mentions, or retweets
+
+2. **Dynamic Source Posts**:
+   - Live posts from Bluesky/Mastodon
+   - Filtered for quality
+   - HTML content handling
+   - Automatic text cleaning
+
+### Processing Training Data
+
+Two utility scripts handle training data:
+
+1. `convert-csv.js`:
+   - Converts tweets.csv to clean text
+   - Removes URLs and mentions
+   - Filters out retweets
+   - Normalizes whitespace
+
+2. `add-training-data.js`:
+   - Uploads processed text to KV
+   - Handles large datasets
+   - Progress reporting
+   - Error handling
 
 ## Configuration
 
@@ -82,24 +120,30 @@ A Cloudflare Workers-based social media bot that generates and posts content usi
 
 ### Worker Configuration
 Edit `wrangler.toml` to configure:
-- Cron schedule
-- Memory limits
-- CPU time
+- KV namespace binding
+- Cron schedule (every 2 hours)
+- Compatibility date
 - Environment variables
 
 ## Text Generation
 
-The bot uses Markov chains to generate text from multiple sources:
+The bot uses order-2 Markov chains with multiple data sources:
 
-1. **Bluesky Posts**:
-   - Fetches recent posts from source accounts
-   - Excludes replies for better quality
-   - Removes URLs and mentions
+1. **Training Corpus**:
+   - Stored in KV namespace
+   - Pre-processed for quality
+   - Large dataset for variety
 
-2. **Mastodon Posts**:
-   - Retrieves recent toots from source accounts
-   - Handles HTML content
-   - Filters boosts and replies
+2. **Live Platform Posts**:
+   - Bluesky posts from source accounts
+   - Mastodon toots from source accounts
+   - Real-time content integration
+
+### Generation Process
+1. Combines KV training data with live posts
+2. Builds Markov chain with order 2
+3. Generates text with max length limit
+4. Posts to both platforms if probability check passes
 
 ## Development
 
@@ -126,7 +170,7 @@ The bot uses Markov chains to generate text from multiple sources:
 
 ### Best Practices
 - Test locally before deployment
-- Use environment variables for configuration
+- Process training data before upload
 - Monitor worker execution metrics
 - Implement proper error handling
 
@@ -134,20 +178,20 @@ The bot uses Markov chains to generate text from multiple sources:
 
 Common issues and solutions:
 
-1. **API Errors**:
-   - Check credentials in environment variables
+1. **Training Data**:
+   - Check CSV format
+   - Verify KV namespace binding
+   - Monitor upload progress
+
+2. **API Errors**:
+   - Check credentials
    - Verify API base URLs
    - Ensure account handles are correct
 
-2. **Worker Execution**:
-   - Check CPU/Memory limits
-   - Verify cron schedule
+3. **Worker Execution**:
+   - Check cron schedule
+   - Verify KV access
    - Monitor execution logs
-
-3. **Posting Issues**:
-   - Check API permissions
-   - Verify environment variables
-   - Monitor rate limits
 
 ## Contributing
 

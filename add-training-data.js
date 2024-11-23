@@ -7,10 +7,15 @@ async function addTrainingData(filePath) {
     // Read the file
     const text = fs.readFileSync(filePath, 'utf8');
     
-    // Split into lines
-    const lines = text.split('\n').filter(line => line.trim());
+    // Split into lines and clean them
+    const lines = text
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('RT '));
     
-    // Get worker URL from wrangler dev output
+    console.log(`Found ${lines.length} lines of training data`);
+    
+    // Start wrangler dev
     console.log('Starting wrangler dev...');
     const workerProcess = require('child_process').spawn('npx', ['wrangler', 'dev'], {
       stdio: ['inherit', 'pipe', 'inherit']
@@ -34,11 +39,12 @@ async function addTrainingData(filePath) {
 }
 
 async function uploadData(workerUrl, lines) {
-  console.log(`Uploading ${lines.length} lines...`);
+  console.log(`\nUploading ${lines.length} lines...`);
   let success = 0;
   let failed = 0;
   
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     try {
       const response = await fetch(workerUrl, {
         method: 'POST',
@@ -51,6 +57,11 @@ async function uploadData(workerUrl, lines) {
       } else {
         failed++;
         console.error(`Failed to upload: ${line.substring(0, 50)}...`);
+      }
+
+      // Show progress every 100 lines
+      if ((i + 1) % 100 === 0) {
+        console.log(`Progress: ${i + 1}/${lines.length} lines (${Math.round((i + 1) / lines.length * 100)}%)`);
       }
     } catch (error) {
       failed++;

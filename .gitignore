@@ -39,7 +39,7 @@ build/
 
 # Python
 *.pyc
-__pycache__
 *.csv
 tweets.txt
+tweets.csv
 local_settings.py

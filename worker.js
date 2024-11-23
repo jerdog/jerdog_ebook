@@ -26,21 +26,51 @@ class MarkovGenerator {
       return this.words.join(' ');
     }
 
-    const startIdx = Math.floor(Math.random() * (this.words.length - this.order));
-    let current = this.words.slice(startIdx, startIdx + this.order);
-    const result = [...current];
+    let attempts = 0;
+    const maxAttempts = 10; // Prevent infinite loops
+    let generatedText = '';
 
-    for (let i = 0; i < maxLength; i++) {
-      const key = current.join(' ');
-      if (!this.cache.has(key)) break;
+    while (attempts < maxAttempts) {
+      const startIdx = Math.floor(Math.random() * (this.words.length - this.order));
+      let current = this.words.slice(startIdx, startIdx + this.order);
+      const result = [...current];
 
-      const nextWords = this.cache.get(key);
-      const nextWord = nextWords[Math.floor(Math.random() * nextWords.length)];
-      result.push(nextWord);
-      current = result.slice(-this.order);
+      // Generate text
+      for (let i = 0; i < maxLength; i++) {
+        const key = current.join(' ');
+        if (!this.cache.has(key)) break;
+
+        const nextWords = this.cache.get(key);
+        const nextWord = nextWords[Math.floor(Math.random() * nextWords.length)];
+        result.push(nextWord);
+        current = result.slice(-this.order);
+      }
+
+      generatedText = result.join(' ');
+      
+      // Check if the text meets our length requirements
+      if (generatedText.length >= 100 && generatedText.length <= 280) {
+        return generatedText;
+      }
+
+      attempts++;
     }
 
-    return result.join(' ');
+    // If we couldn't generate text within limits after max attempts,
+    // truncate or pad the last attempt
+    if (generatedText.length > 280) {
+      // Truncate to last complete word within 280 chars
+      return generatedText.substring(0, 280).replace(/\s\S*$/, '');
+    } else if (generatedText.length < 100 && this.words.length >= 5) {
+      // Pad with random words from training data if too short
+      while (generatedText.length < 100) {
+        const randomWord = this.words[Math.floor(Math.random() * this.words.length)];
+        generatedText += ' ' + randomWord;
+      }
+      return generatedText;
+    }
+
+    return generatedText;
   }
 }
 

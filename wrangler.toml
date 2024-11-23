@@ -3,11 +3,11 @@ main = "worker.js"
 compatibility_date = "2023-01-01"
 
 kv_namespaces = [
-  { binding = "TRAINING_DATA", id = "training-data" }
+  { binding = "TRAINING_DATA", id = "674b794cff044a0783630d84e91d3843" }
 ]
 
 [triggers]
-cron = "0 */2 * * *"
+crons = ["0 */2 * * *"]
 
 [vars]
 # These will be set via `wrangler secret put` command
