@@ -131,9 +131,23 @@ The `/generate` endpoint returns:
 }
 ```
 
-## Scheduled Posts
+## Scheduled Operations
 
-The bot automatically generates posts every 2 hours with a random chance of posting (configurable). Manual triggers via the `/generate` endpoint always generate a post.
+The bot operates on two different schedules:
+
+1. Reply Checking (Every 30 minutes)
+   - Checks for new replies on all platforms
+   - Generates contextual responses
+   - Applies random delays for natural interaction
+   - Maintains response limits per post
+
+2. Content Generation (Every 2 hours)
+   - May generate a new post (50% chance)
+   - Uses training data and recent posts
+   - Applies style variations
+   - Posts to all configured platforms
+
+This dual-schedule approach ensures quick responses to interactions while maintaining a reasonable pace for new content generation.
 
 ## Development
 

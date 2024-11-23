@@ -207,6 +207,20 @@ class BlueskyAPI {
       return false;
     }
   }
+
+  async getSourceTexts(accounts) {
+    try {
+      const texts = [];
+      for (const account of accounts) {
+        const posts = await this.getPosts(account);
+        texts.push(...posts);
+      }
+      return texts;
+    } catch (error) {
+      console.error('Error getting source texts:', error);
+      return [];
+    }
+  }
 }
 
 class MastodonAPI {
@@ -295,6 +309,20 @@ class MastodonAPI {
     } catch (error) {
       console.error('Error checking replies:', error);
       return false;
+    }
+  }
+
+  async getSourceTexts(accounts) {
+    try {
+      const texts = [];
+      for (const account of accounts) {
+        const posts = await this.getPosts(account);
+        texts.push(...posts);
+      }
+      return texts;
+    } catch (error) {
+      console.error('Error getting source texts:', error);
+      return [];
     }
   }
 }
@@ -530,89 +558,92 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
-      // Only use odds for scheduled posts, not manual triggers
-      if (event && !shouldPost()) {
-        return { success: true, message: 'Skipped posting based on odds' };
-      }
-
       // Initialize APIs
       const bluesky = new BlueskyAPI(env.BLUESKY_UID, env.BLUESKY_PWD);
       const mastodon = new MastodonAPI(env.MASTODON_API_BASE_URL, env.MASTODON_ACCESS_TOKEN);
 
-      // Check and respond to replies first
-      await Promise.all([
-        bluesky.checkReplies(),
-        mastodon.checkReplies()
-      ]);
+      // Get the cron pattern that triggered this execution
+      const cronPattern = event.cron;
 
-      // Get source texts
-      const sourceTexts = [];
+      // Check if this is a 30-minute check (for replies) or 2-hour check (for new posts)
+      const isReplyCheck = cronPattern === "*/30 * * * *";
+      const isPostCheck = cronPattern === "0 */2 * * *";
 
-      // Get training data from KV
-      const trainingData = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
-      if (Array.isArray(trainingData)) {
+      if (isReplyCheck || isPostCheck) {
+        // Always check replies
+        await Promise.all([
+          bluesky.checkReplies(),
+          mastodon.checkReplies()
+        ]);
+      }
+
+      // Only create new posts on 2-hour schedule
+      if (isPostCheck && shouldPost()) {
+        // Get source texts
+        const sourceTexts = [];
+
+        // Get training data from KV
+        const trainingData = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
         sourceTexts.push(...trainingData);
-      }
 
-      // Get Bluesky posts
-      const blueskyAccounts = JSON.parse(env.BLUESKY_SOURCE_ACCOUNTS);
-      for (const account of blueskyAccounts) {
-        const posts = await bluesky.getPosts(account);
-        sourceTexts.push(...posts);
-      }
+        // Get platform-specific source texts
+        const [blueskyTexts, mastodonTexts] = await Promise.all([
+          bluesky.getSourceTexts(env.BLUESKY_SOURCE_ACCOUNTS),
+          mastodon.getSourceTexts(env.MASTODON_SOURCE_ACCOUNTS)
+        ]);
 
-      // Get Mastodon posts
-      const mastodonAccounts = JSON.parse(env.MASTODON_SOURCE_ACCOUNTS);
-      for (const account of mastodonAccounts) {
-        const posts = await mastodon.getPosts(account);
-        sourceTexts.push(...posts);
-      }
+        sourceTexts.push(...blueskyTexts, ...mastodonTexts);
 
-      if (sourceTexts.length === 0) {
-        throw new Error('No source texts found');
-      }
+        // Generate and post text
+        const generator = new MarkovGenerator(sourceTexts, 2);
+        let newPost = null;
+        let attempts = 0;
+        const maxAttempts = 5;
+        let style;
 
-      // Generate new post with enhanced cleaning
-      const generator = new MarkovGenerator(sourceTexts, 2);
-      let newPost = null;
-      let attempts = 0;
-      const maxAttempts = 5;
-      let style;
+        while (!newPost && attempts < maxAttempts) {
+          // Randomly select a style, weighted towards professional
+          const styleRoll = Math.random();
+          if (styleRoll < 0.6) {
+            style = 'professional';
+          } else if (styleRoll < 0.8) {
+            style = 'casual';
+          } else {
+            style = 'technical';
+          }
 
-      while (!newPost && attempts < maxAttempts) {
-        // Randomly select a style, weighted towards professional
-        const styleRoll = Math.random();
-        if (styleRoll < 0.6) {
-          style = 'professional';
-        } else if (styleRoll < 0.8) {
-          style = 'casual';
-        } else {
-          style = 'technical';
+          let generatedText = generator.generate();
+          newPost = postProcessText(generatedText, style);
+          attempts++;
         }
 
-        let generatedText = generator.generate();
-        newPost = postProcessText(generatedText, style);
-        attempts++;
-      }
+        if (!newPost) {
+          throw new Error('Failed to generate valid post after multiple attempts');
+        }
 
-      if (!newPost) {
-        throw new Error('Failed to generate valid post after multiple attempts');
-      }
+        // Post to platforms
+        const [blueskyResult, mastodonResult] = await Promise.all([
+          bluesky.createPost(newPost),
+          mastodon.createPost(newPost)
+        ]);
 
-      // Post to platforms
-      const blueskySuccess = await bluesky.createPost(newPost);
-      const mastodonSuccess = await mastodon.createPost(newPost);
+        return {
+          success: true,
+          message: 'Posted successfully',
+          post: newPost,
+          style: style,
+          attempts: attempts,
+          sourceCount: sourceTexts.length
+        };
+      }
 
       return {
-        success: blueskySuccess || mastodonSuccess,
-        message: 'Posted successfully',
-        post: newPost,
-        style: style,
-        attempts: attempts,
-        sourceCount: sourceTexts.length
+        success: true,
+        message: isReplyCheck ? 'Checked for replies' : 'Skipped posting based on odds'
       };
+
     } catch (error) {
-      console.error('Error in scheduled task:', error);
+      console.error('Error in scheduled function:', error);
       return {
         success: false,
         error: error.message
