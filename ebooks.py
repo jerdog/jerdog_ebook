@@ -1,191 +1,154 @@
-import re
+#!/usr/bin/env python3
+"""
+Social Media Markov Bot
+
+A multi-platform bot that generates and posts content using Markov chain text generation.
+Supports Bluesky and Mastodon platforms, with flexible source text collection from
+static files and live social media posts.
+
+Features:
+- Markov chain text generation
+- Multi-platform support (Bluesky, Mastodon)
+- Flexible source text collection
+- Debug mode for testing
+- Configurable post frequency
+
+Author: Jeremy Meiss
+Based on: Heroku_ebooks by Tom Meagher
+License: MIT
+"""
+
+import os
 import sys
+import time
+import re
 import random
+import logging
 from mastodon import Mastodon
 from atproto import Client
 import markov
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-import os
-import datetime
-
-try:
-    # Python 3
-    from html.entities import name2codepoint as n2c
-    from urllib.request import urlopen
-except:
-    # Python 2
-    from htmlentitydefs import name2codepoint as n2c
-    from urllib2 import urlopen
-
-# Load environment variables from .env file
-load_dotenv()
-
+import requests
 from local_settings import *
 
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-def connect(type='bluesky'):
-    if type == 'mastodon':
-        print(f"Mastodon Config:")
-        print(f"API Base URL: {MASTODON_API_BASE_URL}")
-        print(f"Client Key: {MASTODON_KEY}")
-        print(f"Client Secret: {MASTODON_SECRET}")
-        print(f"Access Token: {MASTODON_TOKEN}")
-        
-        if not MASTODON_API_BASE_URL:
-            raise ValueError("MASTODON_API_BASE_URL is not set in environment")
-            
-        return Mastodon(
-            client_id=MASTODON_KEY,
-            client_secret=MASTODON_SECRET,
-            access_token=MASTODON_TOKEN,
-            api_base_url=MASTODON_API_BASE_URL
-        )
-    elif type == 'bluesky':
-        print(f"Bluesky Config:")
-        print(f"UID: {BLUESKY_UID}")
-        print(f"Password: {'*' * len(BLUESKY_PWD) if BLUESKY_PWD else 'Not Set'}")
-        
-        if not BLUESKY_UID or not BLUESKY_PWD:
-            raise ValueError("BLUESKY_UID or BLUESKY_PWD not set in environment")
-            
-        client = Client()
-        client.login(BLUESKY_UID, BLUESKY_PWD)
-        return client
-    return None
-
-
-def entity(text):
-    if text[:2] == "&#":
-        try:
-            if text[:3] == "&#x":
-                return chr(int(text[3:-1], 16))
-            else:
-                return chr(int(text[2:-1]))
-        except ValueError:
-            pass
-    else:
-        guess = text[1:-1]
-        if guess == "quot":
-            return '"'
-        else:
-            return chr(n2c[guess])
-    return text
-
-def filter_status(text):
-    text = re.sub(r'\b(RT|MT) .+', '', text)  # take out anything after RT or MT
-    text = re.sub(r'(\#|@|(h\/t)|(http))\S+', '', text)  # Take out URLs, hashtags, hts, etc.
-    text = re.sub(r'\s+', ' ', text)  # collapse consecutive whitespace to single spaces.
-    text = re.sub(r'\"|\(|\)', '', text)  # take out quotes.
-    text = re.sub(r'\s+\(?(via|says)\s@\w+\)?', '', text)  # remove attribution
-    text = re.sub(r'<[^>]*>','', text) #strip out html tags from mastodon posts
-    htmlsents = re.findall(r'&\w+;', text)
-    for item in htmlsents:
-        text = text.replace(item, entity(item))
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-def scrape_page(src_url, web_context, web_attributes):
-    source_statuses = []
-    if not isinstance(src_url, list):
-        src_url = [src_url]
-    if not isinstance(web_context, list):
-        web_context = [web_context]
-    if not isinstance(web_attributes, list):
-        web_attributes = [web_attributes]
-    for url, context, attribute in zip(src_url, web_context, web_attributes):
-        print("Scraping {0}".format(url))
-        try:
-            page = urlopen(url)
-        except Exception as e:
-            print("Cannot open URL: {0}".format(e))
-            continue
-        soup = BeautifulSoup(page, 'html.parser')
-        soup = soup.find(context, attribute)
-        if soup:
-            soup = soup.text
-            if soup:
-                source_statuses += soup.split(".")
-        else:
-            print("Couldn't find the content")
-    return source_statuses
-
-def grab_toots(api, account_handle=None):
-    """Retrieve posts from a Mastodon account"""
-    if not account_handle:
-        return []
+def connect(platform):
+    """
+    Connect to a social media platform's API.
     
+    Args:
+        platform (str): The platform to connect to ('mastodon' or 'bluesky')
+        
+    Returns:
+        API client object or None if connection fails
+    """
     try:
-        # First, search for the account to get its ID
-        print(f"Looking up Mastodon account: {account_handle}")
-        # Remove the @ from the start if present
+        if platform == 'mastodon' and ENABLE_MASTODON_POSTING:
+            return Mastodon(
+                access_token=MASTODON_TOKEN,
+                api_base_url=MASTODON_API_BASE_URL
+            )
+        elif platform == 'bluesky' and ENABLE_BLUESKY_POSTING:
+            return Client(BLUESKY_UID, BLUESKY_PWD)
+        return None
+    except Exception as e:
+        logger.error(f"Error connecting to {platform}: {str(e)}")
+        return None
+
+def grab_toots(api, account_handle):
+    """
+    Retrieve posts from a Mastodon account.
+    
+    Args:
+        api: Mastodon API client
+        account_handle (str): Mastodon account handle (@user@instance)
+        
+    Returns:
+        list: List of post texts
+    """
+    try:
+        # Strip @ from handle if present
         if account_handle.startswith('@'):
             account_handle = account_handle[1:]
             
-        # Split the handle into username and domain
-        if '@' in account_handle:
-            username, domain = account_handle.split('@')
-            if domain != MASTODON_API_BASE_URL.split('://')[-1]:
-                print(f"Warning: Account domain {domain} doesn't match API URL {MASTODON_API_BASE_URL}")
+        logger.info(f"Fetching posts from Mastodon account: {account_handle}")
         
-        accounts = api.account_lookup(account_handle)
-        if not accounts:
-            print(f"Could not find Mastodon account: {account_handle}")
+        # Get account ID
+        account = api.account_lookup(account_handle)
+        if not account:
+            logger.error(f"Could not find Mastodon account: {account_handle}")
             return []
             
-        account_id = accounts.id
-        print(f"Found account ID: {account_id}")
+        # Get posts
+        posts = api.account_statuses(account.id, limit=40)
+        source_posts = []
         
-        # Now fetch the account's posts
-        source_toots = []
-        user_toots = api.account_statuses(account_id, exclude_replies=True, exclude_reblogs=True)
+        for post in posts:
+            if post.content:
+                # Clean up the HTML content
+                text = BeautifulSoup(post.content, 'html.parser').get_text()
+                # Skip replies and boosts
+                if not text.startswith('@') and not hasattr(post, 'reblog'):
+                    # Clean up the text
+                    text = clean_text(text)
+                    if text:
+                        source_posts.append(text)
+                        
+        logger.info(f"Retrieved {len(source_posts)} posts from {account_handle}")
+        return source_posts
         
-        for toot in user_toots:
-            if toot and hasattr(toot, 'content'):
-                content = filter_status(toot.content)
-                if content:
-                    source_toots.append(content)
-        
-        print(f"Retrieved {len(source_toots)} toots from {account_handle}")
-        return source_toots
     except Exception as e:
-        print(f"Error getting Mastodon posts from {account_handle}: {str(e)}")
+        logger.error(f"Error getting Mastodon posts: {str(e)}")
         return []
 
-def grab_bluesky_posts(api, handle=None):
-    """Retrieve posts from a Bluesky account"""
+def grab_bluesky_posts(api, handle):
+    """
+    Retrieve posts from a Bluesky account.
+    
+    Args:
+        api: Bluesky API client
+        handle (str): Bluesky handle (user.bsky.social)
+        
+    Returns:
+        list: List of post texts
+    """
     if not handle:
         return []
         
     try:
-        print(f"Looking up Bluesky account: {handle}")
+        logger.info(f"Looking up Bluesky account: {handle}")
+        
         # Remove @ if present and ensure proper handle format
         if handle.startswith('@'):
             handle = handle[1:]
-            
-        # Make sure handle has .bsky.social if no domain specified
         if '.' not in handle:
             handle = f"{handle}.bsky.social"
             
-        print(f"Formatted handle: {handle}")
+        logger.info(f"Formatted handle: {handle}")
         
         # Get the DID first
         profile = api.com.atproto.identity.resolve_handle({'handle': handle})
         if not profile or not profile.did:
-            print(f"Could not find Bluesky account: {handle}")
+            logger.error(f"Could not find Bluesky account: {handle}")
             return []
             
         did = profile.did
-        print(f"Found DID: {did}")
+        logger.info(f"Found DID: {did}")
         
-        # Now get their posts using the timeline endpoint
+        # Get their posts
         feed = api.app.bsky.feed.get_author_feed({
             'actor': did,
-            'limit': 100  # Get more posts
+            'limit': 100
         })
         
         if not feed or not hasattr(feed, 'feed'):
-            print(f"No posts found for {handle}")
+            logger.error(f"No posts found for {handle}")
             return []
             
         source_posts = []
@@ -196,171 +159,185 @@ def grab_bluesky_posts(api, handle=None):
                 text = post.post.record.text
                 # Skip replies and reposts
                 if not text.startswith('@') and 'rt' not in text.lower():
-                    # Clean up the text
-                    text = re.sub(r'https://\S+', '', text)  # Remove URLs
-                    text = re.sub(r'@\w+', '', text)  # Remove mentions
-                    text = re.sub(r'\s+', ' ', text).strip()  # Clean whitespace
-                    if text:  # Only add non-empty posts
+                    text = clean_text(text)
+                    if text:
                         source_posts.append(text)
                     
-        print(f"Retrieved {len(source_posts)} posts from {handle}")
+        logger.info(f"Retrieved {len(source_posts)} posts from {handle}")
         if DEBUG and source_posts:
-            print("Sample posts:")
+            logger.debug("Sample posts:")
             for i, post in enumerate(source_posts[:3]):
-                print(f"  {i+1}. {post}")
+                logger.debug(f"  {i+1}. {post}")
                 
         return source_posts
+        
     except Exception as e:
-        print(f"Error getting Bluesky posts: {str(e)}")
+        logger.error(f"Error getting Bluesky posts: {str(e)}")
         if DEBUG:
             import traceback
             traceback.print_exc()
         return []
 
-if __name__ == "__main__":
+def clean_text(text):
+    """
+    Clean up post text by removing URLs, mentions, and extra whitespace.
+    
+    Args:
+        text (str): Text to clean
+        
+    Returns:
+        str: Cleaned text
+    """
+    # Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
+    # Remove mentions
+    text = re.sub(r'@\w+', '', text)
+    # Clean whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def generate_post():
+    """
+    Generate a new post using Markov chain text generation.
+    
+    Returns:
+        str: Generated post text
+    """
     if DEBUG:
-        print("\n[DEBUG MODE] Running in debug mode - no posts will be made\n")
-    
-    # Set a random seed based on current time
-    random.seed()
-    
-    print("Retrieving source texts...")
+        logger.info("\nGenerating post...")
+        
+    # Initialize random seed
+    random.seed(time.time())
     
     try:
+        # Connect to platforms
         mastodon_api = connect('mastodon')
         bluesky_api = connect('bluesky')
-
+        
         source_statuses = []
-
-        # Get tweets from static file if enabled
+        
+        # Get posts from all enabled sources
         if STATIC_TEST:
-            print("\nReading from static file:", TEST_SOURCE)
+            logger.info(f"\nReading from static file: {TEST_SOURCE}")
             try:
                 with open(TEST_SOURCE, 'r', encoding='utf8') as f:
                     text = f.read()
-                    # Split on newlines and clean up each tweet
                     tweets = []
                     for line in text.splitlines():
                         line = line.strip()
                         if line:
-                            # Remove the trailing comma and clean up quotes
-                            line = line.rstrip(',').strip()
-                            if line.startswith("'") and line.endswith("'"):
-                                line = line[1:-1]
-                            # Remove t.co URLs
-                            line = re.sub(r'https://t\.co/\w+', '', line)
-                            # Remove mentions for better text generation
-                            line = re.sub(r'@\w+', '', line)
-                            # Clean up extra whitespace
-                            line = re.sub(r'\s+', ' ', line).strip()
-                            if line:  # Only add non-empty lines
+                            line = line.rstrip(',').strip("'")
+                            line = clean_text(line)
+                            if line:
                                 tweets.append(line)
                                 
-                    print(f"Found {len(tweets)} tweets in {TEST_SOURCE}")
+                    logger.info(f"Found {len(tweets)} posts in {TEST_SOURCE}")
                     if DEBUG:
-                        print("\nSample tweets after cleaning:")
+                        logger.debug("\nSample posts:")
                         for i, tweet in enumerate(tweets[:3]):
-                            print(f"{i+1}. {tweet}")
+                            logger.debug(f"{i+1}. {tweet}")
                     source_statuses.extend(tweets)
             except Exception as e:
-                print(f"Error reading {TEST_SOURCE}: {str(e)}")
-        
-        # Get posts from Mastodon if enabled
+                logger.error(f"Error reading {TEST_SOURCE}: {str(e)}")
+                
+        # Get Mastodon posts
         if ENABLE_MASTODON_SOURCES and mastodon_api and MASTODON_SOURCE_ACCOUNTS:
-            print("\nFetching Mastodon posts...")
-            mastodon_accounts = MASTODON_SOURCE_ACCOUNTS.strip('[]').replace('"', '').split(',')
-            for account_handle in mastodon_accounts:
-                if account_handle.strip():
-                    source_statuses.extend(grab_toots(mastodon_api, account_handle.strip()))
+            logger.info("\nFetching Mastodon posts...")
+            for account in MASTODON_SOURCE_ACCOUNTS:
+                if account.strip():
+                    source_statuses.extend(grab_toots(mastodon_api, account.strip()))
                     
-        # Get posts from Bluesky if enabled
+        # Get Bluesky posts
         if ENABLE_BLUESKY_SOURCES and bluesky_api and BLUESKY_SOURCE_ACCOUNTS:
-            print("\nFetching Bluesky posts...")
-            bluesky_accounts = BLUESKY_SOURCE_ACCOUNTS.strip('[]').replace('"', '').split(',')
-            for handle in bluesky_accounts:
+            logger.info("\nFetching Bluesky posts...")
+            for handle in BLUESKY_SOURCE_ACCOUNTS:
                 if handle.strip():
                     source_statuses.extend(grab_bluesky_posts(bluesky_api, handle.strip()))
-
-        if len(source_statuses) == 0:
-            print("Error: No source texts found!")
-            sys.exit(1)
-
-        print(f"\nFound {len(source_statuses)} total source texts")
-        if DEBUG:
-            print("\nSample of combined source texts:")
-            for i, status in enumerate(random.sample(source_statuses, min(3, len(source_statuses)))):
-                print(f"{i+1}. {status}")
-        
-        order = ORDER
-        guess = 0
-        if ODDS and not DEBUG:
-            guess = random.randint(0, ODDS - 1)
-
-        if guess:
-            print(str(guess) + " No, sorry, not this time.")  # message if the random number fails.
-            sys.exit()
-        else:
-            mine = markov.MarkovChainer(order)
-            for status in source_statuses:
-                if not re.search(SOURCE_EXCLUDE, status):
-                    mine.add_text(status)
-
-            for x in range(0, 10):
-                ebook_status = mine.generate_sentence()
-
-                if ebook_status:
-                    # randomly drop the last word, as Horse_ebooks appears to do
-                    if random.randint(0, 4) == 0 and re.search(r'(in|to|from|for|with|by|our|of|your|around|under|beyond)\s\w+$', ebook_status) is not None:
-                        print("Losing last word randomly")
-                        ebook_status = re.sub(r'\s\w+.$', '', ebook_status)
-
-                    # if it's very short, try to add another sentence
-                    if len(ebook_status) < 40:
-                        print("Short status, trying to add another sentence")
-                        second_sentence = mine.generate_sentence()
-                        if second_sentence:
-                            ebook_status += " " + second_sentence
-
-                    # Remove scary values
-                    ebook_status = ebook_status.replace("|", "I")
-                    ebook_status = ebook_status.replace("&gt;", ">")
-                    ebook_status = ebook_status.replace("&lt;", "<")
-
-                    print("\nGenerated status: " + ebook_status + "\n")
                     
-                    if DEBUG:
-                        print("[DEBUG MODE] Would have posted to:")
-                        if ENABLE_MASTODON_POSTING and mastodon_api:
-                            print("- Mastodon")
-                        if ENABLE_BLUESKY_POSTING and bluesky_api:
-                            print("- Bluesky")
-                    else:
-                        if ENABLE_MASTODON_POSTING and mastodon_api:
-                            try:
-                                mastodon_api.toot(ebook_status)
-                                print("Posted to Mastodon successfully!")
-                            except Exception as e:
-                                print(f"Error posting to Mastodon: {str(e)}")
-                                
-                        if ENABLE_BLUESKY_POSTING and bluesky_api:
-                            try:
-                                record = {
-                                    '$type': 'app.bsky.feed.post',
-                                    'text': ebook_status,
-                                    'createdAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                                }
-                                
-                                bluesky_api.com.atproto.repo.create_record({
-                                    'repo': bluesky_api.me.did,
-                                    'collection': 'app.bsky.feed.post',
-                                    'record': record
-                                })
-                                print("Posted to Bluesky successfully!")
-                            except Exception as e:
-                                print(f"Error posting to Bluesky: {str(e)}")
-
-                    sys.exit()
-
+        if not source_statuses:
+            logger.error("Error: No source texts found!")
+            return None
+            
+        logger.info(f"\nFound {len(source_statuses)} total source texts")
+        
+        # Generate new text
+        generator = markov.MarkovGenerator(source_statuses, ORDER)
+        generated = generator.generate_text()
+        
+        if DEBUG:
+            logger.debug(f"\nGenerated text: {generated}")
+            
+        return generated
+        
     except Exception as e:
-        print(f"Error: {str(e)}")
-        sys.exit(1)
+        logger.error(f"Error generating post: {str(e)}")
+        if DEBUG:
+            import traceback
+            traceback.print_exc()
+        return None
+
+def post_text(text, platform_api, platform_name):
+    """
+    Post text to a social media platform.
+    
+    Args:
+        text (str): Text to post
+        platform_api: Platform API client
+        platform_name (str): Platform name for logging
+        
+    Returns:
+        bool: True if post was successful
+    """
+    if not text or not platform_api:
+        return False
+        
+    try:
+        if platform_name == 'mastodon':
+            platform_api.status_post(text)
+        elif platform_name == 'bluesky':
+            platform_api.com.atproto.repo.create_record({
+                'repo': platform_api.me.did,
+                'collection': 'app.bsky.feed.post',
+                'record': {
+                    'text': text,
+                    'createdAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                }
+            })
+        logger.info(f"Posted to {platform_name}: {text}")
+        return True
+    except Exception as e:
+        logger.error(f"Error posting to {platform_name}: {str(e)}")
+        return False
+
+def main():
+    """Main function to run the bot."""
+    if DEBUG:
+        logger.info("\n[DEBUG MODE] Running in debug mode - no posts will be made\n")
+        
+    # Random chance of running
+    if ODDS and not DEBUG:
+        if random.randint(0, ODDS - 1) != 0:
+            logger.info("Not running this time")
+            return
+            
+    # Generate post
+    text = generate_post()
+    if not text:
+        logger.error("Failed to generate post")
+        return
+        
+    # Post to platforms
+    if not DEBUG:
+        if ENABLE_MASTODON_POSTING:
+            mastodon_api = connect('mastodon')
+            post_text(text, mastodon_api, 'mastodon')
+            
+        if ENABLE_BLUESKY_POSTING:
+            bluesky_api = connect('bluesky')
+            post_text(text, bluesky_api, 'bluesky')
+    else:
+        logger.info("[DEBUG] Would have posted:")
+        logger.info(text)
+
+if __name__ == "__main__":
+    main()
