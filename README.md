@@ -1,6 +1,6 @@
 # Social Media Markov Chain Bot
 
-A serverless social media bot that generates and posts content to multiple platforms using Markov chains and intelligent text processing.
+A serverless social media bot that generates and posts content to multiple platforms using Markov chains and intelligent text processing. Inspired by the now archived https://github.com/tommeagher/heroku_ebooks.
 
 ## Features
 
@@ -45,13 +45,13 @@ The bot supports three distinct writing styles:
 
 ### Prerequisites
 - Node.js and npm
-- Wrangler CLI (`npm install -g wrangler`)
-- Cloudflare account
-- Bluesky account
-- Mastodon account
+- Cloudflare Wrangler CLI (`npm install -g wrangler`)
+- [Cloudflare](https://developers.cloudflare.com/) account
+- [Bluesky](https://bluesky.social/) account (if using Bluesky)
+- [Mastodon] account (if using Mastodon)
 
 ### Installation
-1. Clone the repository
+1. Fork and then clone the repository
 2. Install dependencies:
    ```bash
    npm install
