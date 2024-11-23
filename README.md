@@ -11,6 +11,7 @@ A Cloudflare Workers-based social media bot that generates and posts content usi
   - Mastodon integration with HTML content handling
 - Advanced Markov chain text generation:
   - Order-2 Markov chains for natural text flow
+  - Smart length constraints (100-280 chars)
   - Sophisticated text cleaning
   - Natural language output
 - Training data management:
@@ -142,7 +143,11 @@ The bot uses order-2 Markov chains with multiple data sources:
 ### Generation Process
 1. Combines KV training data with live posts
 2. Builds Markov chain with order 2
-3. Generates text with max length limit
+3. Generates text between 100-280 characters
+   - Minimum 100 chars for meaningful content
+   - Maximum 280 chars for platform compatibility
+   - Smart retry logic for optimal length
+   - Fallback handling for edge cases
 4. Posts to both platforms if probability check passes
 
 ## Development
