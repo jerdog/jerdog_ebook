@@ -158,6 +158,55 @@ class BlueskyAPI {
       return false;
     }
   }
+
+  async checkReplies() {
+    try {
+      const agent = await this.getAgent();
+      const profile = await agent.getProfile({ actor: this.identifier });
+      const feed = await agent.getAuthorFeed({ actor: profile.data.did });
+      
+      // Get our recent posts
+      const recentPosts = feed.data.feed.slice(0, 10);
+      
+      for (const post of recentPosts) {
+        // Get replies to this post
+        const replies = await agent.getPostThread({ uri: post.post.uri });
+        const replyPosts = replies.data.thread.replies || [];
+        
+        for (const reply of replyPosts) {
+          // Skip our own replies
+          if (reply.post.author.did === profile.data.did) continue;
+          
+          // Check if we should respond
+          if (shouldRespond(reply.post.uri)) {
+            // Generate response with context
+            const context = reply.post.record.text;
+            const response = await generateText(context);
+            
+            // Add random delay
+            const delay = getRandomDelay();
+            await new Promise(resolve => setTimeout(resolve, delay * 1000));
+            
+            // Reply to the post
+            await agent.post({
+              text: response,
+              reply: {
+                root: { uri: post.post.uri, cid: post.post.cid },
+                parent: { uri: reply.post.uri, cid: reply.post.cid }
+              }
+            });
+            
+            // Update response counter
+            responseTracker.set(reply.post.uri, responseTracker.get(reply.post.uri) + 1);
+          }
+        }
+      }
+      return true;
+    } catch (error) {
+      console.error('Error checking replies:', error);
+      return false;
+    }
+  }
 }
 
 class MastodonAPI {
@@ -209,6 +258,42 @@ class MastodonAPI {
       return response.ok;
     } catch (error) {
       console.error('Error posting to Mastodon:', error);
+      return false;
+    }
+  }
+
+  async checkReplies() {
+    try {
+      const notifications = await fetch(
+        `${this.instanceUrl}/api/v1/notifications?types[]=mention`,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.accessToken}`
+          }
+        }
+      ).then(res => res.json());
+      
+      for (const notification of notifications) {
+        // Skip if we've already responded enough
+        if (!shouldRespond(notification.status.id)) continue;
+        
+        // Generate response with context
+        const context = notification.status.content.replace(/<[^>]+>/g, '');
+        const response = await generateText(context);
+        
+        // Add random delay
+        const delay = getRandomDelay();
+        await new Promise(resolve => setTimeout(resolve, delay * 1000));
+        
+        // Post the response
+        await this.post(response, { in_reply_to_id: notification.status.id });
+        
+        // Update response counter
+        responseTracker.set(notification.status.id, responseTracker.get(notification.status.id) + 1);
+      }
+      return true;
+    } catch (error) {
+      console.error('Error checking replies:', error);
       return false;
     }
   }
@@ -341,6 +426,35 @@ function shouldPost(odds = 2) {
   return Math.floor(Math.random() * odds) === 0;
 }
 
+// Response configuration
+const RESPONSE_CONFIG = {
+  probability: 0.6, // 60% chance to respond
+  maxResponsesPerPost: 3, // Maximum number of responses per post
+  minResponseDelay: 30, // Minimum delay in seconds
+  maxResponseDelay: 300, // Maximum delay in seconds
+};
+
+// Track posts we've responded to
+let responseTracker = new Map();
+
+// Helper to check if we should respond
+function shouldRespond(postId) {
+  if (!responseTracker.has(postId)) {
+    responseTracker.set(postId, 0);
+  }
+  
+  const responseCount = responseTracker.get(postId);
+  return Math.random() < RESPONSE_CONFIG.probability && 
+         responseCount < RESPONSE_CONFIG.maxResponsesPerPost;
+}
+
+// Helper to get random delay
+function getRandomDelay() {
+  return Math.floor(Math.random() * 
+    (RESPONSE_CONFIG.maxResponseDelay - RESPONSE_CONFIG.minResponseDelay + 1) + 
+    RESPONSE_CONFIG.minResponseDelay);
+}
+
 // Main worker code
 export default {
   async fetch(request, env, ctx) {
@@ -424,6 +538,12 @@ export default {
       // Initialize APIs
       const bluesky = new BlueskyAPI(env.BLUESKY_UID, env.BLUESKY_PWD);
       const mastodon = new MastodonAPI(env.MASTODON_API_BASE_URL, env.MASTODON_ACCESS_TOKEN);
+
+      // Check and respond to replies first
+      await Promise.all([
+        bluesky.checkReplies(),
+        mastodon.checkReplies()
+      ]);
 
       // Get source texts
       const sourceTexts = [];

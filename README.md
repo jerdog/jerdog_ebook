@@ -17,6 +17,15 @@ A serverless social media bot that generates and posts content to multiple platf
 - HTML entity conversion
 - Proper punctuation handling
 
+### Intelligent Interaction
+- Automated response to replies
+- Context-aware responses using Markov chains
+- Smart response rate limiting:
+  - 60% chance to respond to any reply
+  - Maximum 3 responses per post
+  - Random delays (30-300 seconds)
+  - Platform-specific reply handling
+
 ### Text Style Variations
 The bot supports three distinct writing styles:
 
