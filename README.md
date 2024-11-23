@@ -1,4 +1,4 @@
-# Social Media Markov Chain Bot
+# Social Media ebook bot
 
 A serverless social media bot that generates and posts content to multiple platforms using Markov chains and intelligent text processing.
 
