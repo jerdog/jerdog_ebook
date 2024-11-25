@@ -75,74 +75,72 @@ class MarkovGenerator {
 }
 
 class BlueskyAPI {
-  constructor(username, password) {
-    this.username = username;
+  constructor(identifier, password) {
+    this.identifier = identifier;
     this.password = password;
-    this.did = null;
-    this.jwt = null;
+    this.agent = null;
   }
 
-  async login() {
-    const response = await fetch('https://bsky.social/xrpc/com.atproto.server.createSession', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier: this.username, password: this.password })
-    });
-
-    const data = await response.json();
-    this.did = data.did;
-    this.jwt = data.accessJwt;
-    return this.jwt;
+  async getAgent() {
+    if (!this.agent) {
+      const { BskyAgent } = await import('@atproto/api');
+      this.agent = new BskyAgent({ service: 'https://bsky.social' });
+      await this.agent.login({ identifier: this.identifier, password: this.password });
+    }
+    return this.agent;
   }
 
-  async getPosts(handle, limit = 100) {
+  async getPosts(handle) {
     try {
-      if (!this.jwt) {
-        await this.login();
+      const agent = await this.getAgent();
+      const profile = await agent.getProfile({ actor: handle });
+      const feed = await agent.getAuthorFeed({ actor: profile.data.did, limit: 50 });
+      
+      if (!feed?.data?.feed) {
+        console.warn(`No feed data found for ${handle}`);
+        return [];
       }
 
-      // Resolve handle to DID
-      const handleResponse = await fetch(
-        `https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle=${handle}`,
-        {
-          headers: { 'Authorization': `Bearer ${this.jwt}` }
-        }
-      );
-      const { did } = await handleResponse.json();
-
-      // Get posts
-      const postsResponse = await fetch(
-        `https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?actor=${did}&limit=${limit}`,
-        {
-          headers: { 'Authorization': `Bearer ${this.jwt}` }
-        }
-      );
-
-      const data = await postsResponse.json();
-      return data.feed
-        .filter(item => item.post && item.post.record)
-        .map(item => cleanText(item.post.record.text))
-        .filter(text => text);
+      return feed.data.feed
+        .filter(item => item.post?.record?.text)
+        .map(item => cleanText(item.post.record.text));
     } catch (error) {
-      console.error('Error getting Bluesky posts:', error);
+      console.error(`Error getting Bluesky posts for ${handle}:`, error);
+      return [];
+    }
+  }
+
+  async getSourceTexts(accounts) {
+    try {
+      if (!Array.isArray(accounts)) {
+        accounts = JSON.parse(accounts);
+      }
+      
+      const texts = [];
+      // Limit concurrent requests to avoid rate limiting
+      for (const account of accounts.slice(0, 5)) {
+        const posts = await this.getPosts(account);
+        texts.push(...posts);
+        // Add a small delay between requests
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      return texts;
+    } catch (error) {
+      console.error('Error getting Bluesky source texts:', error);
       return [];
     }
   }
 
   async createPost(text) {
     try {
-      if (!this.jwt) {
-        await this.login();
-      }
-
       const response = await fetch('https://bsky.social/xrpc/com.atproto.repo.createRecord', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.jwt}`,
+          'Authorization': `Bearer ${this.agent.authToken}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          repo: this.did,
+          repo: this.agent.did,
           collection: 'app.bsky.feed.post',
           record: {
             text,
@@ -207,20 +205,6 @@ class BlueskyAPI {
       return false;
     }
   }
-
-  async getSourceTexts(accounts) {
-    try {
-      const texts = [];
-      for (const account of accounts) {
-        const posts = await this.getPosts(account);
-        texts.push(...posts);
-      }
-      return texts;
-    } catch (error) {
-      console.error('Error getting source texts:', error);
-      return [];
-    }
-  }
 }
 
 class MastodonAPI {
@@ -229,31 +213,65 @@ class MastodonAPI {
     this.accessToken = accessToken;
   }
 
-  async getPosts(account, limit = 100) {
+  async getPosts(account) {
     try {
-      // Look up account ID
-      const lookupResponse = await fetch(
-        `${this.instanceUrl}/api/v1/accounts/lookup?acct=${account}`,
+      const accountId = account.replace('@', '');
+      // First get the account ID
+      const accountInfo = await fetch(
+        `${this.instanceUrl}/api/v1/accounts/lookup?acct=${accountId}`,
         {
-          headers: { 'Authorization': `Bearer ${this.accessToken}` }
+          headers: {
+            'Authorization': `Bearer ${this.accessToken}`
+          }
         }
-      );
-      const { id: accountId } = await lookupResponse.json();
+      ).then(res => res.json());
 
-      // Get statuses
-      const statusesResponse = await fetch(
-        `${this.instanceUrl}/api/v1/accounts/${accountId}/statuses?limit=${limit}&exclude_reblogs=true&exclude_replies=true`,
+      if (!accountInfo?.id) {
+        console.warn(`No account found for ${account}`);
+        return [];
+      }
+
+      // Then get their posts
+      const statuses = await fetch(
+        `${this.instanceUrl}/api/v1/accounts/${accountInfo.id}/statuses?limit=40&exclude_replies=true&exclude_reblogs=true`,
         {
-          headers: { 'Authorization': `Bearer ${this.accessToken}` }
+          headers: {
+            'Authorization': `Bearer ${this.accessToken}`
+          }
         }
-      );
+      ).then(res => res.json());
 
-      const statuses = await statusesResponse.json();
+      if (!Array.isArray(statuses)) {
+        console.warn(`No statuses found for ${account}`);
+        return [];
+      }
+
       return statuses
-        .map(status => cleanText(extractTextFromHtml(status.content)))
-        .filter(text => text);
+        .filter(status => status.content)
+        .map(status => cleanText(status.content));
     } catch (error) {
-      console.error('Error getting Mastodon posts:', error);
+      console.error(`Error getting Mastodon posts for ${account}:`, error);
+      return [];
+    }
+  }
+
+  async getSourceTexts(accounts) {
+    try {
+      if (!Array.isArray(accounts)) {
+        accounts = JSON.parse(accounts);
+      }
+      
+      const texts = [];
+      // Limit concurrent requests to avoid rate limiting
+      for (const account of accounts.slice(0, 3)) {
+        const posts = await this.getPosts(account);
+        texts.push(...posts);
+        // Add a larger delay for Mastodon to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      return texts;
+    } catch (error) {
+      console.error('Error getting Mastodon source texts:', error);
       return [];
     }
   }
@@ -309,20 +327,6 @@ class MastodonAPI {
     } catch (error) {
       console.error('Error checking replies:', error);
       return false;
-    }
-  }
-
-  async getSourceTexts(accounts) {
-    try {
-      const texts = [];
-      for (const account of accounts) {
-        const posts = await this.getPosts(account);
-        texts.push(...posts);
-      }
-      return texts;
-    } catch (error) {
-      console.error('Error getting source texts:', error);
-      return [];
     }
   }
 }
@@ -579,62 +583,91 @@ export default {
 
       // Only create new posts on 2-hour schedule
       if (isPostCheck && shouldPost()) {
-        // Get source texts
-        const sourceTexts = [];
-
-        // Get training data from KV
-        const trainingData = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
-        sourceTexts.push(...trainingData);
-
-        // Get platform-specific source texts
-        const [blueskyTexts, mastodonTexts] = await Promise.all([
-          bluesky.getSourceTexts(env.BLUESKY_SOURCE_ACCOUNTS),
-          mastodon.getSourceTexts(env.MASTODON_SOURCE_ACCOUNTS)
-        ]);
-
-        sourceTexts.push(...blueskyTexts, ...mastodonTexts);
-
-        // Generate and post text
-        const generator = new MarkovGenerator(sourceTexts, 2);
-        let newPost = null;
-        let attempts = 0;
-        const maxAttempts = 5;
-        let style;
-
-        while (!newPost && attempts < maxAttempts) {
-          // Randomly select a style, weighted towards professional
-          const styleRoll = Math.random();
-          if (styleRoll < 0.6) {
-            style = 'professional';
-          } else if (styleRoll < 0.8) {
-            style = 'casual';
-          } else {
-            style = 'technical';
+        try {
+          // Get source texts with error handling
+          let sourceTexts = [];
+          
+          // Get training data from KV
+          try {
+            const trainingData = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
+            sourceTexts.push(...trainingData);
+          } catch (error) {
+            console.error('Error getting training data:', error);
           }
 
-          let generatedText = generator.generate();
-          newPost = postProcessText(generatedText, style);
-          attempts++;
+          // Get platform-specific source texts with timeouts
+          const timeoutPromise = (promise, timeout) => {
+            return Promise.race([
+              promise,
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout')), timeout)
+              )
+            ]);
+          };
+
+          try {
+            const [blueskyTexts, mastodonTexts] = await Promise.all([
+              timeoutPromise(bluesky.getSourceTexts(env.BLUESKY_SOURCE_ACCOUNTS), 10000),
+              timeoutPromise(mastodon.getSourceTexts(env.MASTODON_SOURCE_ACCOUNTS), 10000)
+            ]);
+
+            if (blueskyTexts?.length) sourceTexts.push(...blueskyTexts);
+            if (mastodonTexts?.length) sourceTexts.push(...mastodonTexts);
+          } catch (error) {
+            console.error('Error getting platform texts:', error);
+          }
+
+          // Ensure we have enough source texts
+          if (sourceTexts.length < 10) {
+            console.warn('Insufficient source texts, using training data only');
+            sourceTexts = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
+          }
+
+          // Generate and post text
+          const generator = new MarkovGenerator(sourceTexts, 2);
+          let newPost = null;
+          let attempts = 0;
+          const maxAttempts = 5;
+          let style;
+
+          while (!newPost && attempts < maxAttempts) {
+            // Randomly select a style, weighted towards professional
+            const styleRoll = Math.random();
+            if (styleRoll < 0.6) {
+              style = 'professional';
+            } else if (styleRoll < 0.8) {
+              style = 'casual';
+            } else {
+              style = 'technical';
+            }
+
+            let generatedText = generator.generate();
+            newPost = postProcessText(generatedText, style);
+            attempts++;
+          }
+
+          if (!newPost) {
+            throw new Error('Failed to generate valid post after multiple attempts');
+          }
+
+          // Post to platforms
+          const [blueskyResult, mastodonResult] = await Promise.all([
+            bluesky.createPost(newPost),
+            mastodon.createPost(newPost)
+          ]);
+
+          return {
+            success: true,
+            message: 'Posted successfully',
+            post: newPost,
+            style: style,
+            attempts: attempts,
+            sourceCount: sourceTexts.length
+          };
+        } catch (error) {
+          console.error('Error in post generation:', error);
+          throw error;
         }
-
-        if (!newPost) {
-          throw new Error('Failed to generate valid post after multiple attempts');
-        }
-
-        // Post to platforms
-        const [blueskyResult, mastodonResult] = await Promise.all([
-          bluesky.createPost(newPost),
-          mastodon.createPost(newPost)
-        ]);
-
-        return {
-          success: true,
-          message: 'Posted successfully',
-          post: newPost,
-          style: style,
-          attempts: attempts,
-          sourceCount: sourceTexts.length
-        };
       }
 
       return {
