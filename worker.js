@@ -160,48 +160,79 @@ class BlueskyAPI {
   async checkReplies() {
     try {
       const agent = await this.getAgent();
-      const profile = await agent.getProfile({ actor: this.identifier });
-      const feed = await agent.getAuthorFeed({ actor: profile.data.did });
+      
+      // Get our own profile
+      let profile;
+      try {
+        profile = await agent.getProfile({ actor: this.identifier });
+      } catch (error) {
+        console.warn('Could not get profile:', error);
+        return false;
+      }
+      
+      if (!profile?.data?.did) {
+        console.warn('Profile data not found');
+        return false;
+      }
+
+      // Get our recent posts
+      let feed;
+      try {
+        feed = await agent.getAuthorFeed({ actor: profile.data.did });
+      } catch (error) {
+        console.warn('Could not get author feed:', error);
+        return false;
+      }
+
+      if (!feed?.data?.feed) {
+        console.warn('Feed data not found');
+        return false;
+      }
       
       // Get our recent posts
       const recentPosts = feed.data.feed.slice(0, 10);
       
       for (const post of recentPosts) {
         // Get replies to this post
-        const replies = await agent.getPostThread({ uri: post.post.uri });
-        const replyPosts = replies.data.thread.replies || [];
-        
-        for (const reply of replyPosts) {
-          // Skip our own replies
-          if (reply.post.author.did === profile.data.did) continue;
+        try {
+          const replies = await agent.getPostThread({ uri: post.post.uri });
+          const replyPosts = replies?.data?.thread?.replies || [];
           
-          // Check if we should respond
-          if (shouldRespond(reply.post.uri)) {
-            // Generate response with context
-            const context = reply.post.record.text;
-            const response = await generateText(context);
+          for (const reply of replyPosts) {
+            // Skip our own replies
+            if (reply.post.author.did === profile.data.did) continue;
             
-            // Add random delay
-            const delay = getRandomDelay();
-            await new Promise(resolve => setTimeout(resolve, delay * 1000));
-            
-            // Reply to the post
-            await agent.post({
-              text: response,
-              reply: {
-                root: { uri: post.post.uri, cid: post.post.cid },
-                parent: { uri: reply.post.uri, cid: reply.post.cid }
-              }
-            });
-            
-            // Update response counter
-            responseTracker.set(reply.post.uri, responseTracker.get(reply.post.uri) + 1);
+            // Check if we should respond
+            if (shouldRespond(reply.post.uri)) {
+              // Generate response with context
+              const context = reply.post.record.text;
+              const response = await generateText(context);
+              
+              // Add random delay
+              const delay = getRandomDelay();
+              await new Promise(resolve => setTimeout(resolve, delay * 1000));
+              
+              // Reply to the post
+              await agent.post({
+                text: response,
+                reply: {
+                  root: { uri: post.post.uri, cid: post.post.cid },
+                  parent: { uri: reply.post.uri, cid: reply.post.cid }
+                }
+              });
+              
+              // Update response counter
+              responseTracker.set(reply.post.uri, responseTracker.get(reply.post.uri) + 1);
+            }
           }
+        } catch (error) {
+          console.warn('Error processing post replies:', error);
+          continue;
         }
       }
       return true;
     } catch (error) {
-      console.error('Error checking replies:', error);
+      console.error('Error checking Bluesky replies:', error);
       return false;
     }
   }
@@ -296,36 +327,66 @@ class MastodonAPI {
 
   async checkReplies() {
     try {
-      const notifications = await fetch(
-        `${this.instanceUrl}/api/v1/notifications?types[]=mention`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`
+      // Get notifications with proper error handling
+      let notifications;
+      try {
+        const response = await fetch(
+          `${this.instanceUrl}/api/v1/notifications?types[]=mention`,
+          {
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`
+            }
           }
+        );
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
         }
-      ).then(res => res.json());
+        
+        notifications = await response.json();
+      } catch (error) {
+        console.warn('Error fetching Mastodon notifications:', error);
+        return false;
+      }
+      
+      // Ensure notifications is an array
+      if (!Array.isArray(notifications)) {
+        console.warn('Notifications is not an array:', notifications);
+        return false;
+      }
       
       for (const notification of notifications) {
-        // Skip if we've already responded enough
-        if (!shouldRespond(notification.status.id)) continue;
-        
-        // Generate response with context
-        const context = notification.status.content.replace(/<[^>]+>/g, '');
-        const response = await generateText(context);
-        
-        // Add random delay
-        const delay = getRandomDelay();
-        await new Promise(resolve => setTimeout(resolve, delay * 1000));
-        
-        // Post the response
-        await this.post(response, { in_reply_to_id: notification.status.id });
-        
-        // Update response counter
-        responseTracker.set(notification.status.id, responseTracker.get(notification.status.id) + 1);
+        try {
+          // Validate notification structure
+          if (!notification?.status?.id || !notification?.status?.content) {
+            console.warn('Invalid notification structure:', notification);
+            continue;
+          }
+          
+          // Skip if we've already responded enough
+          if (!shouldRespond(notification.status.id)) continue;
+          
+          // Generate response with context
+          const context = notification.status.content.replace(/<[^>]+>/g, '');
+          const response = await generateText(context);
+          
+          // Add random delay
+          const delay = getRandomDelay();
+          await new Promise(resolve => setTimeout(resolve, delay * 1000));
+          
+          // Post the response
+          await this.post(response, { in_reply_to_id: notification.status.id });
+          
+          // Update response counter
+          responseTracker.set(notification.status.id, responseTracker.get(notification.status.id) + 1);
+        } catch (error) {
+          console.warn('Error processing notification:', error);
+          continue;
+        }
       }
       return true;
     } catch (error) {
-      console.error('Error checking replies:', error);
+      console.error('Error checking Mastodon replies:', error);
       return false;
     }
   }
