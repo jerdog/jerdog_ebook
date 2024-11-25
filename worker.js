@@ -168,10 +168,10 @@ class BlueskyAPI {
         profile = await agent.getProfile({ actor: this.identifier });
       } catch (error) {
         try {
-          // If handle fails, try with DID
-          const session = await agent.getSession();
-          if (!session) {
-            console.warn('No session available');
+          // If handle fails, try with the current session's DID
+          const session = await agent.api.app.getSession();
+          if (!session?.did) {
+            console.warn('No valid session available');
             return false;
           }
           profile = await agent.getProfile({ actor: session.did });
@@ -335,6 +335,26 @@ class MastodonAPI {
         return false;
       }
 
+      // First verify the token and scopes
+      try {
+        const verifyResponse = await fetch(
+          `${this.instanceUrl}/api/v1/apps/verify_credentials`,
+          {
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`,
+              'Accept': 'application/json'
+            }
+          }
+        );
+        
+        if (!verifyResponse.ok) {
+          throw new Error(`Token verification failed: ${await verifyResponse.text()}`);
+        }
+      } catch (error) {
+        console.warn('Token verification failed:', error);
+        return false;
+      }
+
       // Get notifications with proper error handling
       let notifications;
       try {
@@ -343,14 +363,15 @@ class MastodonAPI {
           {
             headers: {
               'Authorization': `Bearer ${this.accessToken}`,
-              'Accept': 'application/json',
-              'Content-Type': 'application/json'
+              'Accept': 'application/json'
             }
           }
         );
         
         if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status} - ${await response.text()}`);
+          const errorText = await response.text();
+          console.warn('Full error response:', errorText);
+          throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
         }
         
         notifications = await response.json();
@@ -404,7 +425,9 @@ class MastodonAPI {
             );
 
             if (!postResponse.ok) {
-              throw new Error(`HTTP error! status: ${postResponse.status} - ${await postResponse.text()}`);
+              const errorText = await postResponse.text();
+              console.warn('Full post error response:', errorText);
+              throw new Error(`HTTP error! status: ${postResponse.status} - ${errorText}`);
             }
 
             // Update response counter only if post was successful
