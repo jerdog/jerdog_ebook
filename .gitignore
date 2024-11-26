@@ -4,5 +4,5 @@
 __pycache__
 *.csv
 tweets.txt
-.env/
+.env
 local_settings.py
