@@ -44,3 +44,4 @@ tweets.txt
 tweets.csv
 local_settings.py
 .dev.vars
+.env

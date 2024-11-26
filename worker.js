@@ -76,18 +76,26 @@ class MarkovGenerator {
 
 class BlueskyAPI {
   constructor(identifier, password) {
-    this.identifier = identifier;
+    // Ensure identifier is in the correct format (handle.bsky.social)
+    this.identifier = identifier.includes('.') ? identifier : `${identifier}.bsky.social`;
     this.password = password;
     this.agent = null;
   }
 
   async getAgent() {
-    if (!this.agent) {
-      const { BskyAgent } = await import('@atproto/api');
-      this.agent = new BskyAgent({ service: 'https://bsky.social' });
-      await this.agent.login({ identifier: this.identifier, password: this.password });
+    try {
+      if (!this.agent) {
+        const { BskyAgent } = await import('@atproto/api');
+        this.agent = new BskyAgent({ service: 'https://bsky.social' });
+        console.log('Attempting Bluesky login with:', { identifier: this.identifier });
+        await this.agent.login({ identifier: this.identifier, password: this.password });
+        console.log('Bluesky login successful');
+      }
+      return this.agent;
+    } catch (error) {
+      console.error('Bluesky getAgent error:', error);
+      throw error;
     }
-    return this.agent;
   }
 
   async getPosts(handle) {
@@ -133,24 +141,15 @@ class BlueskyAPI {
 
   async createPost(text) {
     try {
-      const response = await fetch('https://bsky.social/xrpc/com.atproto.repo.createRecord', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.agent.authToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          repo: this.agent.did,
-          collection: 'app.bsky.feed.post',
-          record: {
-            text,
-            $type: 'app.bsky.feed.post',
-            createdAt: new Date().toISOString()
-          }
-        })
+      console.log('Attempting to create Bluesky post:', { textLength: text.length });
+      const agent = await this.getAgent();
+      await agent.post({
+        text,
+        $type: 'app.bsky.feed.post',
+        createdAt: new Date().toISOString()
       });
-
-      return response.ok;
+      console.log('Bluesky post created successfully');
+      return true;
     } catch (error) {
       console.error('Error posting to Bluesky:', error);
       return false;
@@ -169,12 +168,11 @@ class BlueskyAPI {
       } catch (error) {
         try {
           // If handle fails, try with the current session's DID
-          const session = await agent.api.app.getSession();
-          if (!session?.did) {
+          if (!agent.session?.did) {
             console.warn('No valid session available');
             return false;
           }
-          profile = await agent.getProfile({ actor: session.did });
+          profile = await agent.getProfile({ actor: agent.session.did });
         } catch (innerError) {
           console.warn('Could not get profile with either handle or DID:', innerError);
           return false;
@@ -246,34 +244,56 @@ class MastodonAPI {
     this.accessToken = accessToken;
   }
 
+  async makeRequest(endpoint, options = {}) {
+    try {
+      const url = new URL(endpoint, this.instanceUrl).toString();
+      console.log('Making Mastodon request:', { url, method: options.method || 'GET' });
+      
+      const defaultOptions = {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Accept': 'application/json'
+        }
+      };
+
+      const response = await fetch(url, { ...defaultOptions, ...options });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Mastodon API Error (${endpoint}):`, {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorText,
+          url
+        });
+        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+      console.log('Mastodon request successful:', { endpoint, status: response.status });
+      return data;
+    } catch (error) {
+      console.error('Mastodon request failed:', {
+        error: error.message,
+        endpoint,
+        instanceUrl: this.instanceUrl
+      });
+      throw error;
+    }
+  }
+
   async getPosts(account) {
     try {
       const accountId = account.replace('@', '');
       // First get the account ID
-      const accountInfo = await fetch(
-        `${this.instanceUrl}/api/v1/accounts/lookup?acct=${accountId}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`
-          }
-        }
-      ).then(res => res.json());
-
+      const accountInfo = await this.makeRequest(`/api/v1/accounts/lookup?acct=${accountId}`);
       if (!accountInfo?.id) {
         console.warn(`No account found for ${account}`);
         return [];
       }
 
       // Then get their posts
-      const statuses = await fetch(
-        `${this.instanceUrl}/api/v1/accounts/${accountInfo.id}/statuses?limit=40&exclude_replies=true&exclude_reblogs=true`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`
-          }
-        }
-      ).then(res => res.json());
-
+      const statuses = await this.makeRequest(`/api/v1/accounts/${accountInfo.id}/statuses?limit=40&exclude_replies=true&exclude_reblogs=true`);
       if (!Array.isArray(statuses)) {
         console.warn(`No statuses found for ${account}`);
         return [];
@@ -311,18 +331,22 @@ class MastodonAPI {
 
   async createPost(text) {
     try {
-      const response = await fetch(`${this.instanceUrl}/api/v1/statuses`, {
+      console.log('Attempting to create Mastodon post:', { textLength: text.length });
+      const response = await this.makeRequest('/api/v1/statuses', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ status: text })
+        body: JSON.stringify({ status: text, visibility: 'public' })
       });
 
-      return response.ok;
+      console.log('Mastodon post created successfully:', { id: response.id });
+      return true;
     } catch (error) {
-      console.error('Error posting to Mastodon:', error);
+      console.error('Error posting to Mastodon:', {
+        error: error.message,
+        textLength: text.length
+      });
       return false;
     }
   }
@@ -335,46 +359,19 @@ class MastodonAPI {
         return false;
       }
 
-      // First verify the token and scopes
+      // First get account information to verify token
       try {
-        const verifyResponse = await fetch(
-          `${this.instanceUrl}/api/v1/apps/verify_credentials`,
-          {
-            headers: {
-              'Authorization': `Bearer ${this.accessToken}`,
-              'Accept': 'application/json'
-            }
-          }
-        );
-        
-        if (!verifyResponse.ok) {
-          throw new Error(`Token verification failed: ${await verifyResponse.text()}`);
-        }
+        const account = await this.makeRequest('/api/v1/accounts/verify_credentials');
+        console.log('Account verified:', account.username);
       } catch (error) {
-        console.warn('Token verification failed:', error);
+        console.warn('Account verification failed:', error);
         return false;
       }
 
-      // Get notifications with proper error handling
+      // Get notifications
       let notifications;
       try {
-        const response = await fetch(
-          `${this.instanceUrl}/api/v1/notifications?types[]=mention&limit=20`,
-          {
-            headers: {
-              'Authorization': `Bearer ${this.accessToken}`,
-              'Accept': 'application/json'
-            }
-          }
-        );
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.warn('Full error response:', errorText);
-          throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-        }
-        
-        notifications = await response.json();
+        notifications = await this.makeRequest('/api/v1/notifications?exclude_types[]=follow&exclude_types[]=favourite&exclude_types[]=reblog&exclude_types[]=poll&exclude_types[]=follow_request');
       } catch (error) {
         console.warn('Error fetching Mastodon notifications:', error);
         return false;
@@ -405,30 +402,19 @@ class MastodonAPI {
           const delay = getRandomDelay();
           await new Promise(resolve => setTimeout(resolve, delay * 1000));
           
-          // Post the response with proper error handling
+          // Post the response
           try {
-            const postResponse = await fetch(
-              `${this.instanceUrl}/api/v1/statuses`,
-              {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${this.accessToken}`,
-                  'Content-Type': 'application/json',
-                  'Accept': 'application/json'
-                },
-                body: JSON.stringify({
-                  status: response,
-                  in_reply_to_id: notification.status.id,
-                  visibility: 'public'
-                })
-              }
-            );
-
-            if (!postResponse.ok) {
-              const errorText = await postResponse.text();
-              console.warn('Full post error response:', errorText);
-              throw new Error(`HTTP error! status: ${postResponse.status} - ${errorText}`);
-            }
+            await this.makeRequest('/api/v1/statuses', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                status: response,
+                in_reply_to_id: notification.status.id,
+                visibility: 'public'
+              })
+            });
 
             // Update response counter only if post was successful
             responseTracker.set(notification.status.id, responseTracker.get(notification.status.id) + 1);
@@ -605,32 +591,144 @@ function getRandomDelay() {
     RESPONSE_CONFIG.minResponseDelay);
 }
 
+// Utility functions for logging and error handling
+function logError(context, error, details = {}) {
+  const errorInfo = {
+    context,
+    message: error.message,
+    stack: error.stack,
+    timestamp: new Date().toISOString(),
+    ...details
+  };
+  console.error('Error:', JSON.stringify(errorInfo, null, 2));
+  return errorInfo;
+}
+
+function logInfo(context, message, details = {}) {
+  const info = {
+    context,
+    message,
+    timestamp: new Date().toISOString(),
+    ...details
+  };
+  console.log('Info:', JSON.stringify(info, null, 2));
+  return info;
+}
+
 // Main worker code
 export default {
   async fetch(request, env, ctx) {
+    const requestId = crypto.randomUUID();
+    logInfo('request.start', 'Processing request', { 
+      requestId,
+      method: request.method,
+      url: request.url
+    });
+
     // Handle POST requests to add training data
     if (request.method === 'POST') {
       const url = new URL(request.url);
       
+      // Check authorization for protected endpoints
+      if (url.pathname === '/generate' || url.pathname === '/check-replies') {
+        const authHeader = request.headers.get('Authorization');
+        if (!authHeader || authHeader !== `Bearer ${env.API_SECRET}`) {
+          const error = new Error('Invalid or missing API_SECRET');
+          logError('auth.failed', error, { requestId, pathname: url.pathname });
+          return new Response(JSON.stringify({ 
+            success: false, 
+            error: 'Unauthorized: Invalid or missing API_SECRET',
+            requestId
+          }), {
+            status: 401,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        logInfo('auth.success', 'Authorization successful', { requestId, pathname: url.pathname });
+      }
+
       // Handle /generate endpoint
       if (url.pathname === '/generate') {
         try {
-          // Optional auth check
-          const authHeader = request.headers.get('Authorization');
-          if (!authHeader || authHeader !== `Bearer ${env.API_SECRET}`) {
-            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-              status: 401,
-              headers: { 'content-type': 'application/json' }
-            });
-          }
+          logInfo('generate.start', 'Starting post generation', { requestId });
+          
+          // Create a mock cron event
+          const mockCronEvent = {
+            cron: '0 */2 * * *',
+            scheduledTime: Date.now(),
+            type: 'scheduled'
+          };
 
-          // Run the scheduled handler directly
-          const result = await this.scheduled(null, env, ctx);
-          return new Response(JSON.stringify(result), {
+          // Run the scheduled handler with mock event
+          const result = await this.scheduled(mockCronEvent, env, ctx);
+          
+          logInfo('generate.success', 'Post generation completed', { 
+            requestId,
+            result 
+          });
+          
+          return new Response(JSON.stringify({ 
+            success: true, 
+            result,
+            requestId
+          }), {
             headers: { 'content-type': 'application/json' }
           });
         } catch (error) {
-          return new Response(JSON.stringify({ error: error.message }), {
+          const errorInfo = logError('generate.failed', error, { requestId, cronEvent: mockCronEvent });
+          
+          return new Response(JSON.stringify({ 
+            success: false, 
+            error: 'Post generation failed: ' + error.message,
+            details: errorInfo,
+            requestId
+          }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+      }
+
+      // Handle /check-replies endpoint
+      if (url.pathname === '/check-replies') {
+        try {
+          logInfo('check-replies.start', 'Starting reply check', { requestId });
+          
+          const bluesky = new BlueskyAPI(env.BLUESKY_UID, env.BLUESKY_PWD);
+          const mastodon = new MastodonAPI(env.MASTODON_API_BASE_URL, env.MASTODON_ACCESS_TOKEN);
+          
+          const results = {
+            bluesky: await bluesky.checkReplies().catch(error => ({
+              success: false,
+              error: error.message
+            })),
+            mastodon: await mastodon.checkReplies().catch(error => ({
+              success: false,
+              error: error.message
+            }))
+          };
+          
+          logInfo('check-replies.complete', 'Reply check completed', { 
+            requestId,
+            results 
+          });
+          
+          return new Response(JSON.stringify({ 
+            success: true, 
+            results,
+            requestId
+          }), {
+            headers: { 'content-type': 'application/json' }
+          });
+        } catch (error) {
+          const errorInfo = logError('check-replies.failed', error, { requestId });
+          
+          return new Response(JSON.stringify({ 
+            success: false, 
+            error: 'Reply check failed: ' + error.message,
+            details: errorInfo,
+            requestId
+          }), {
             status: 500,
             headers: { 'content-type': 'application/json' }
           });
@@ -639,9 +737,11 @@ export default {
 
       // Handle training data upload
       try {
+        logInfo('training.start', 'Processing training data', { requestId });
+        
         const { text } = await request.json();
         if (!text) {
-          throw new Error('No text provided');
+          throw new Error('No text provided for training');
         }
         
         // Get existing training data
@@ -651,14 +751,32 @@ export default {
         }
         
         // Add new text and save
-        trainingData.push(cleanText(text));
+        const cleanedText = cleanText(text);
+        trainingData.push(cleanedText);
         await env.TRAINING_DATA.put('corpus', JSON.stringify(trainingData));
         
-        return new Response(JSON.stringify({ success: true }), {
+        logInfo('training.success', 'Training data added', { 
+          requestId,
+          textLength: cleanedText.length,
+          totalEntries: trainingData.length
+        });
+        
+        return new Response(JSON.stringify({ 
+          success: true,
+          message: 'Training data added successfully',
+          requestId
+        }), {
           headers: { 'content-type': 'application/json' }
         });
       } catch (error) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), {
+        const errorInfo = logError('training.failed', error, { requestId });
+        
+        return new Response(JSON.stringify({ 
+          success: false, 
+          error: 'Training data processing failed: ' + error.message,
+          details: errorInfo,
+          requestId
+        }), {
           status: 400,
           headers: { 'content-type': 'application/json' }
         });
@@ -666,12 +784,15 @@ export default {
     }
 
     // List available endpoints
+    logInfo('endpoints.list', 'Displaying available endpoints', { requestId });
     return new Response(
       "Social Media Markov Bot\n\n" +
       "Available endpoints:\n" +
       "- POST /generate: Generate and post new content (requires API_SECRET)\n" +
+      "- POST /check-replies: Check and respond to replies (requires API_SECRET)\n" +
       "- POST /: Add training data\n" +
-      "\nScheduled posts run every 2 hours automatically.",
+      "\nScheduled posts run every 2 hours automatically.\n" +
+      "\nFor detailed error messages, check the response JSON and logs.",
       {
         headers: { "content-type": "text/plain" },
       }
@@ -679,125 +800,130 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    const executionId = crypto.randomUUID();
+    logInfo('scheduled.start', 'Starting scheduled execution', { 
+      executionId,
+      cronPattern: event?.cron,
+      type: event?.type
+    });
+
     try {
+      // Skip if not the right schedule (for manual triggers, always run)
+      if (event?.type === 'scheduled' && event.cron === '*/30 * * * *') {
+        logInfo('scheduled.replies', 'Checking replies', { executionId });
+        
+        // Initialize APIs
+        const bluesky = new BlueskyAPI(env.BLUESKY_UID, env.BLUESKY_PWD);
+        const mastodon = new MastodonAPI(env.MASTODON_API_BASE_URL, env.MASTODON_ACCESS_TOKEN);
+        
+        // Check replies
+        const results = await Promise.all([
+          bluesky.checkReplies().catch(error => ({
+            platform: 'bluesky',
+            success: false,
+            error: error.message
+          })),
+          mastodon.checkReplies().catch(error => ({
+            platform: 'mastodon',
+            success: false,
+            error: error.message
+          }))
+        ]);
+        
+        logInfo('scheduled.replies.complete', 'Reply check completed', { 
+          executionId,
+          results 
+        });
+        
+        return { 
+          success: true, 
+          message: 'Replies checked',
+          results,
+          executionId
+        };
+      }
+
+      // For 2-hour schedule or manual triggers
+      logInfo('scheduled.post', 'Generating new post', { 
+        executionId,
+        envCheck: {
+          blueskyConfigured: !!(env.BLUESKY_UID && env.BLUESKY_PWD),
+          mastodonConfigured: !!(env.MASTODON_API_BASE_URL && env.MASTODON_ACCESS_TOKEN),
+          blueskyUid: env.BLUESKY_UID,
+          mastodonUrl: env.MASTODON_API_BASE_URL,
+          blueskySourceAccounts: env.BLUESKY_SOURCE_ACCOUNTS,
+          mastodonSourceAccounts: env.MASTODON_SOURCE_ACCOUNTS
+        }
+      });
+      
       // Initialize APIs
       const bluesky = new BlueskyAPI(env.BLUESKY_UID, env.BLUESKY_PWD);
       const mastodon = new MastodonAPI(env.MASTODON_API_BASE_URL, env.MASTODON_ACCESS_TOKEN);
-
-      // Get the cron pattern that triggered this execution
-      const cronPattern = event.cron;
-
-      // Check if this is a 30-minute check (for replies) or 2-hour check (for new posts)
-      const isReplyCheck = cronPattern === "*/30 * * * *";
-      const isPostCheck = cronPattern === "0 */2 * * *";
-
-      if (isReplyCheck || isPostCheck) {
-        // Always check replies
-        await Promise.all([
-          bluesky.checkReplies(),
-          mastodon.checkReplies()
-        ]);
+      
+      // Get training data
+      let trainingData = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
+      if (!Array.isArray(trainingData) || trainingData.length === 0) {
+        throw new Error('No training data available');
       }
+      
+      logInfo('scheduled.data', 'Retrieved training data', { 
+        executionId,
+        entries: trainingData.length 
+      });
 
-      // Only create new posts on 2-hour schedule
-      if (isPostCheck && shouldPost()) {
-        try {
-          // Get source texts with error handling
-          let sourceTexts = [];
-          
-          // Get training data from KV
-          try {
-            const trainingData = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
-            sourceTexts.push(...trainingData);
-          } catch (error) {
-            console.error('Error getting training data:', error);
-          }
+      // Generate text
+      const generator = new MarkovGenerator(trainingData);
+      const text = generator.generate();
+      if (!text) {
+        throw new Error('Failed to generate text');
+      }
+      
+      logInfo('scheduled.text', 'Generated text', { 
+        executionId,
+        textLength: text.length 
+      });
 
-          // Get platform-specific source texts with timeouts
-          const timeoutPromise = (promise, timeout) => {
-            return Promise.race([
-              promise,
-              new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Timeout')), timeout)
-              )
-            ]);
-          };
-
-          try {
-            const [blueskyTexts, mastodonTexts] = await Promise.all([
-              timeoutPromise(bluesky.getSourceTexts(env.BLUESKY_SOURCE_ACCOUNTS), 10000),
-              timeoutPromise(mastodon.getSourceTexts(env.MASTODON_SOURCE_ACCOUNTS), 10000)
-            ]);
-
-            if (blueskyTexts?.length) sourceTexts.push(...blueskyTexts);
-            if (mastodonTexts?.length) sourceTexts.push(...mastodonTexts);
-          } catch (error) {
-            console.error('Error getting platform texts:', error);
-          }
-
-          // Ensure we have enough source texts
-          if (sourceTexts.length < 10) {
-            console.warn('Insufficient source texts, using training data only');
-            sourceTexts = await env.TRAINING_DATA.get('corpus', { type: 'json' }) || [];
-          }
-
-          // Generate and post text
-          const generator = new MarkovGenerator(sourceTexts, 2);
-          let newPost = null;
-          let attempts = 0;
-          const maxAttempts = 5;
-          let style;
-
-          while (!newPost && attempts < maxAttempts) {
-            // Randomly select a style, weighted towards professional
-            const styleRoll = Math.random();
-            if (styleRoll < 0.6) {
-              style = 'professional';
-            } else if (styleRoll < 0.8) {
-              style = 'casual';
-            } else {
-              style = 'technical';
-            }
-
-            let generatedText = generator.generate();
-            newPost = postProcessText(generatedText, style);
-            attempts++;
-          }
-
-          if (!newPost) {
-            throw new Error('Failed to generate valid post after multiple attempts');
-          }
-
-          // Post to platforms
-          const [blueskyResult, mastodonResult] = await Promise.all([
-            bluesky.createPost(newPost),
-            mastodon.createPost(newPost)
-          ]);
-
+      // Post to platforms
+      const results = await Promise.all([
+        bluesky.createPost(text).catch(error => {
+          console.error('Bluesky post error details:', error);
           return {
-            success: true,
-            message: 'Posted successfully',
-            post: newPost,
-            style: style,
-            attempts: attempts,
-            sourceCount: sourceTexts.length
+            platform: 'bluesky',
+            success: false,
+            error: error.message || 'Unknown error'
           };
-        } catch (error) {
-          console.error('Error in post generation:', error);
-          throw error;
-        }
-      }
-
-      return {
+        }),
+        mastodon.createPost(text).catch(error => {
+          console.error('Mastodon post error details:', error);
+          return {
+            platform: 'mastodon',
+            success: false,
+            error: error.message || 'Unknown error'
+          };
+        })
+      ]);
+      
+      logInfo('scheduled.post.complete', 'Post creation completed', { 
+        executionId,
+        results,
+        text
+      });
+      
+      return { 
         success: true,
-        message: isReplyCheck ? 'Checked for replies' : 'Skipped posting based on odds'
+        message: 'Post created and shared',
+        text,
+        results,
+        executionId
       };
-
     } catch (error) {
-      console.error('Error in scheduled function:', error);
-      return {
+      const errorInfo = logError('scheduled.failed', error, { executionId });
+      
+      return { 
         success: false,
-        error: error.message
+        error: 'Scheduled execution failed: ' + error.message,
+        details: errorInfo,
+        executionId
       };
     }
   }
